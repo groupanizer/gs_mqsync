@@ -1,0 +1,163 @@
+<?php
+
+static $connection;
+
+/**
+ * Utility functions
+ */
+
+/**
+ * Substitute role IDs with machine names, and only send the named roles
+ */
+function _gs_mqsync_fix_roles($roles) {
+  static $rolemap;
+  if( !isset($rolemap) ) {
+    $rolemap = db_query("SELECT rid, machine_name FROM role")->fetchAllKeyed();
+  }
+  $new_roles = array();
+  foreach(array_keys($roles) AS $rid) {
+    $machine_name = $rolemap[$rid];
+    if( _g3core_role_category($machine_name) == 'named' ) {
+      $new_roles[] = $machine_name;
+    }
+  }
+  return $new_roles;
+}
+
+/**
+ * Substitute term machine names for terms
+ */
+function _gs_mqsync_fix_taxonomy($tax) {
+  if( isset($tax['tid']) ) {
+    return db_query("SELECT machine_name FROM taxonomy_term_data WHERE tid = :tid",
+      array(':tid'=>$tax['tid']))->fetchField();
+  }
+  return $tax;
+}
+
+/**
+ * Main send method
+ */
+function gs_mqsync_send($queue, $operation, $package) {
+
+  global $connection;
+
+  if( !isset($connection) ) {
+    $connection = RabbitMQConnection::get();
+  }
+  $channel = $connection->channel();
+  $channel->queue_declare('user', false, false, false, false);
+  $msg = new AMQPMessage(serialize(array(
+    'operation' => $operation,
+    'domain' => g3core_get_domain(),
+    'data' => $package,
+  )));
+  $channel->basic_publish($msg, '', 'user');
+  
+}
+
+/**
+ * define which fields we care about, for sending to universe or
+ * for determining if a record has changed materially
+ */
+function gs_mqsync_person_fields() {
+  return array(
+    'uuid',
+    'mail',
+    'roles',
+    'field_first_name',
+    'field_last_name',
+    'field_member_id',
+    'field_birthday',
+    'field_address',
+    'field_home_phone',
+    'field_work_phone',
+    'field_mobile_phone',
+    'field_member_since',
+    'field_dues_paid_until',
+    'field_voice_part',
+  );
+}
+
+/**
+ * clean up the person object for sending
+ */
+function gs_mqsync_send_person($queue, $operation, $account) {
+
+  // just the fields we care about, and grab the best language
+  $lang = isset($account->language) ? $account->language : LANGUAGE_NONE;
+  $package = new StdClass();
+  foreach( gs_mqsync_person_fields() AS $field ) {
+    // first look for straight scalar values, like email and uuid
+    if( is_scalar($account->$field) ) {
+      $package->$field = $account->$field;
+    } 
+    // now look for a value field of the specified language
+    else if( isset($account->{$field}[$lang][0]['value']) ) {
+      $package->$field = $account->{$field}[$lang][0]['value'];
+    } 
+    else if( isset($account->{$field}[LANGUAGE_NONE][0]['value'] ) ) {
+      $package->$field = $account->{$field}[LANGUAGE_NONE][0]['value'];
+    } 
+    // otherwise just pass the whole array, either language
+    else if( isset($account->{$field}[$lang][0] ) ) {
+      $package->$field = $account->{$field}[$lang][0];
+    } 
+    else if( isset($account->{$field}[LANGUAGE_NONE][0] ) ) {
+      $package->$field = $account->{$field}[LANGUAGE_NONE][0];
+    }
+    // if we fall through to here, just pass through (eg. for roles)
+    else {
+      $package->$field = $account->$field;
+    }
+  }
+
+  // get rid of cruft on the address field
+  if( isset($package->field_address) ) {
+    unset($package->field_address['location_settings']);
+  }
+
+  // machine name substitutions for some fields
+  if( isset($package->roles) ) {
+    $package->roles = _gs_mqsync_fix_roles($package->roles);
+  }
+  if( isset($package->field_voice_part) ) {
+    $package->field_voice_part = _gs_mqsync_fix_taxonomy($package->field_voice_part);
+  }
+
+  gs_mqsync_send($queue, $operation, $package);
+}
+
+/**
+ * hook_user_insert
+ */
+function gs_mqsync_user_insert(&$edit, $account, $category) {
+  gs_mqsync_send_person('user', 'insert', $account);
+}
+
+/**
+ * hook_user_update
+ */
+function gs_mqsync_user_update(&$edit, $account, $category) {
+
+// for now just send it all the time
+gs_mqsync_send_person('user', 'update', $account);
+return;
+
+// later we'll skip sending if nothing changed
+  foreach( gs_mqsync_person_fields() AS $field ) {
+    if( !isset($account->$field) ) continue;
+    if( $account->$field != $account->original->$field ) {
+      gs_mqsync_send_person('user', 'update', $account);
+      return;
+    }
+  }
+}
+
+/**
+ * hook_user_delete
+ */
+function gs_mqsync_user_delete($account) {
+  gs_mqsync_send('user', 'delete', $account->uuid);
+}
+

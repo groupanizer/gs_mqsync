@@ -1,0 +1,9 @@
+name = Groupanizer Message Queue Sync
+description = Fast message sending and receiving utilities for Groupanizer
+package = Groupanizer Sing
+core = 7.x
+version = 7.x-1.0
+files[] = gs_mqsync.module
+dependencies[] = rabbitmq
+l10n server = http://local.groupanizer.com
+l10n url = http://local.groupanizer.com/sites/local.groupanizer.com/files/l10n_packager/l10n_server.xml
