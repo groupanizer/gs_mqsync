@@ -88,6 +88,9 @@ function gs_mqsync_send_person($queue, $operation, $account) {
   $lang = isset($account->language) ? $account->language : LANGUAGE_NONE;
   $package = new StdClass();
   foreach( gs_mqsync_person_fields() AS $field ) {
+    // don't send empty values
+    if( empty($account->$field) ) continue;
+
     // first look for straight scalar values, like email and uuid
     if( is_scalar($account->$field) ) {
       $package->$field = $account->$field;
