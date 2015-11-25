@@ -47,12 +47,12 @@ function gs_mqsync_send($queue, $operation, $package) {
   }
   $channel = $connection->channel();
   $channel->queue_declare('user', false, false, false, false);
-  $msg = new AMQPMessage(serialize(array(
+  $msg = new  AMQPMessage(serialize(array(
     'operation' => $operation,
     'domain' => g3core_get_domain(),
     'data' => $package,
   )));
-  $channel->basic_publish($msg, '', 'user');
+  $channel->basic_publish($msg, '', 'universe_user');
   
 }
 
@@ -88,8 +88,12 @@ function gs_mqsync_send_person($queue, $operation, $account) {
   $lang = isset($account->language) ? $account->language : LANGUAGE_NONE;
   $package = new StdClass();
   foreach( gs_mqsync_person_fields() AS $field ) {
-    // don't send empty values
-    if( empty($account->$field) ) continue;
+    // don't send empty values, even if nested
+    if( empty($account->$field) ) { continue; }
+    else {
+      if( isset($account->$field[$lang]) && empty($account->$field[$lang]) ) continue;
+      if( isset($account->$field[LANGAUGE_NONE]) && empty($account->$field[LANGUAGE_NONE]) ) continue;
+    }
 
     // first look for straight scalar values, like email and uuid
     if( is_scalar($account->$field) ) {
@@ -135,7 +139,7 @@ function gs_mqsync_send_person($queue, $operation, $account) {
  * hook_user_insert
  */
 function gs_mqsync_user_insert(&$edit, $account, $category) {
-  gs_mqsync_send_person('user', 'insert', $account);
+  gs_mqsync_send_person('user', 'create', $account);
 }
 
 /**
