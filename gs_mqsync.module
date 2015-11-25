@@ -46,7 +46,7 @@ function gs_mqsync_send($queue, $operation, $package) {
     $connection = RabbitMQConnection::get();
   }
   $channel = $connection->channel();
-  $channel->queue_declare('user', false, false, false, false);
+  $channel->queue_declare('universe_user', false, false, false, false);
   $msg = new  AMQPMessage(serialize(array(
     'operation' => $operation,
     'domain' => g3core_get_domain(),
