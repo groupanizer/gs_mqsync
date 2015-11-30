@@ -7,7 +7,7 @@ function gs_mqsync_install() {
   variable_set('rabbitmq_credentials', array(
     'host' => '198.16.5.72',
     'port' => 5672,
-    'username' => 'tom',
-    'password' => 'r@bbit123',
+    'username' => 'g3site',
+    'password' => 'g3site',
   ));
 }

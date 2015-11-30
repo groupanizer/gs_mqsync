@@ -2,9 +2,45 @@
 
 static $connection;
 
+// temporary menu item for testing
+function gs_mqsync_menu() {
+
+  // admin interface
+  $items['admin/config/groupanizer/sync'] = array(
+    'title' => 'Sync settings',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('gs_mqsync_settings_form'),
+    'access arguments' => array('only user 1'),
+    'file' => 'gs_mqsync.admin.inc',
+  );
+
+  // TEMPORARY
+  $items['univrec'] = array(
+    'title' => "Receive updated from universe",
+    'page callback' => 'gs_mqsync_receive_updates',
+    'access arguments' => array('bypass node access'),
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
 /**
  * Utility functions
  */
+
+/**
+ * semaphore to prevent loops while receiving a sync
+ * - call with argument to set
+ * - call with no argument to read
+ */
+function _gs_mqsync_receiving($set = null) {
+  static $gs_mqsync_receiving_updates;
+  if( !is_null($set) ) {
+    $gs_mqsync_receiving_updates = $set;
+  }
+  return $gs_mqsync_receiving_updates;
+}
 
 /**
  * Substitute role IDs with machine names, and only send the named roles
@@ -36,6 +72,14 @@ function _gs_mqsync_fix_taxonomy($tax) {
 }
 
 /**
+ * hook_cron
+ * @purpose processes pending messages in the queue
+ */
+function gs_mqsync_cron() {
+  gs_mqsync_process_queue();
+}
+
+/**
  * Main send method
  */
 function gs_mqsync_send($queue, $operation, $package) {
@@ -63,6 +107,8 @@ function gs_mqsync_send($queue, $operation, $package) {
 function gs_mqsync_person_fields() {
   return array(
     'uuid',
+    'name',
+    'pass',
     'mail',
     'roles',
     'field_first_name',
@@ -91,8 +137,8 @@ function gs_mqsync_send_person($queue, $operation, $account) {
     // don't send empty values, even if nested
     if( empty($account->$field) ) { continue; }
     else {
-      if( isset($account->$field[$lang]) && empty($account->$field[$lang]) ) continue;
-      if( isset($account->$field[LANGAUGE_NONE]) && empty($account->$field[LANGUAGE_NONE]) ) continue;
+      if( isset($account->{$field}[$lang]) && empty($account->{$field}[$lang]) ) continue;
+      if( isset($account->{$field}[LANGUAGE_NONE]) && empty($account->{$field}[LANGUAGE_NONE]) ) continue;
     }
 
     // first look for straight scalar values, like email and uuid
@@ -139,6 +185,7 @@ function gs_mqsync_send_person($queue, $operation, $account) {
  * hook_user_insert
  */
 function gs_mqsync_user_insert(&$edit, $account, $category) {
+  if( !variable_get('gs_mqsync_sync_send', TRUE) || _gs_mqsync_receiving() ) return;
   gs_mqsync_send_person('user', 'create', $account);
 }
 
@@ -146,6 +193,7 @@ function gs_mqsync_user_insert(&$edit, $account, $category) {
  * hook_user_update
  */
 function gs_mqsync_user_update(&$edit, $account, $category) {
+  if( !variable_get('gs_mqsync_sync_send', TRUE) || _gs_mqsync_receiving() ) return;
 
 // for now just send it all the time
 gs_mqsync_send_person('user', 'update', $account);
@@ -165,6 +213,138 @@ return;
  * hook_user_delete
  */
 function gs_mqsync_user_delete($account) {
+  if( !variable_get('gs_mqsync_sync_send', TRUE) || _gs_mqsync_receiving() ) return;
   gs_mqsync_send('user', 'delete', $account->uuid);
 }
 
+
+/**
+ * Manually grab any pending updates in the queue
+ */
+function gs_mqsync_receive_updates() {
+  $result = gs_mqsync_process_queue();
+  return 
+    "Created {$result['created']} records<br>
+    Updated {$result['updated']} records<br>
+    Deleted {$result['deleted']} records<br>";
+
+}
+
+/**
+ * Receive any pending messages and make the corresponding updates
+ */
+
+function gs_mqsync_process_queue() {
+
+  if( !variable_get('gs_mqsync_sync_receive', TRUE) ) return;
+
+  _gs_mqsync_receiving(TRUE);
+
+  global $connection;
+
+  if( !isset($connection) ) {
+    $connection = RabbitMQConnection::get();
+  }
+  $channel = $connection->channel();
+
+  $channel->queue_declare('barbershop_nz', false, false, false, false);
+
+  $created_count = $updated_count = $deleted_count = 0;
+  while( $msg = $channel->basic_get('barbershop_nz', true) ) {
+    $package = unserialize($msg->body);
+
+    switch($package['operation']) {
+      case 'person_update':
+        $created = gs_mqsync_process_person_update($package['data']);
+        if( $created ) {
+          $created_count++;
+        } else {
+          $updated_count++;
+        }
+        break;
+
+      case 'person_delete':
+        $deleted = gu_mqsync_process_person_delete($package['data']);
+        if( $deleted ) {
+          $deleted_count++;
+        }
+        break;
+
+      default:
+        watchdog('gs_mqsync', "Unknown operation @op received - doing nothing.", array('@op'=>$data['operation']));
+        break;
+    }
+  }
+
+  // shut down the channel now that we're done with it
+  $channel->close();
+  $connection->close();
+  
+  return array(
+    'created' => $created_count,
+    'updated' => $updated_count,
+    'deleted' => $deleted_count,
+  );
+}
+
+/**
+ * Process an incoming person record from Universe
+ * @return TRUE if we created a new record, FALSE for an update
+ */
+function gs_mqsync_process_person_update($update_package) {
+
+  try {
+
+    $membership = $update_package['membership'];
+    $person = $update_package['person'];
+
+    // first let's see if we've already got a record for this person, by UUID
+    $uuid = $person->uuid;
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'user');
+    $query->propertyCondition('uuid', $uuid);
+    $result = $query->execute();
+
+    if( isset($result['user']) ) {
+      $ids = array_keys($result['user']);
+      $list = entity_load('user', $ids);
+      $user = reset($list);
+      $created = FALSE;
+    } else {
+      $user = entity_create('user', array('type'=>'user'));
+      $user->uuid = $uuid;
+      $created = TRUE;
+      // some fields that should only be set on creation
+      $user->status = 1;
+      $user->name = strtolower("{$person->first_name}.{$person->last_name}");
+      foreach($person->emails AS $e) {
+        if( $e['is_primary'] ) {
+          $user->mail = $e['email'];
+        }
+      }
+    }
+
+    // now update remaining fields and save the user object
+    $uw = entity_metadata_wrapper('user', $user);
+    $uw->field_first_name = $person->first_name;
+    $uw->field_last_name = $person->last_name;
+
+    $uw->save();
+
+  } catch( Exception $e ) {
+    $msg = t("Exception @msg on package: <pre>@package</pre>",
+             array('@msg'=>$e->getMessage(), '@package'=>print_r($update_package,TRUE)));
+    drupal_set_message($msg, 'error');
+    watchdog('gs_mqsync', $msg);
+  }
+
+  return $created;
+}
+
+/**
+ * Process an incoming person delete record from Universe
+ */
+function gu_mqsync_process_person_delete($delete_package) {
+  dpm($delete_package);
+  return TRUE;
+}
