@@ -15,6 +15,6 @@ function gs_mqsync_settings_form() {
     '#default_value' => variable_get('gs_mqsync_sync_receive', TRUE),
   );
 
-  return $form;
+  return system_settings_form($form);
 }
 
