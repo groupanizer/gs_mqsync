@@ -2,6 +2,24 @@
 
 static $connection;
 
+/**
+ * Utils
+ */
+
+/** 
+ * Convert domain name to queue name
+ */
+function _gs_mqsync_convert_domain_to_queue_name($domain) {
+  // strip off any prefix
+  $queue_name = str_replace('http://', '', $domain);
+  // replace dots with underscore
+  $queue_name = str_replace('.', '_', $queue_name);
+  // trim just in case
+  $queue_name = trim($queue_name);
+  return $queue_name;
+}
+
+
 // temporary menu item for testing
 function gs_mqsync_menu() {
 
@@ -105,24 +123,29 @@ function gs_mqsync_send($queue, $operation, $package) {
  * for determining if a record has changed materially
  */
 function gs_mqsync_person_fields() {
-  return array(
-    'uuid',
-    'name',
-    'pass',
-    'mail',
-    'roles',
-    'field_first_name',
-    'field_last_name',
-    'field_member_id',
-    'field_birthday',
-    'field_address',
-    'field_home_phone',
-    'field_work_phone',
-    'field_mobile_phone',
-    'field_member_since',
-    'field_dues_paid_until',
-    'field_voice_part',
-  );
+  static $fields;
+  if( !isset($fields) ) {
+    $fields = array(
+      'uuid',
+      'name',
+      'pass',
+      'mail',
+      'roles',
+      'field_first_name',
+      'field_last_name',
+      'field_member_id',
+      'field_birthday',
+      'field_address',
+      'field_home_phone',
+      'field_work_phone',
+      'field_mobile_phone',
+      'field_member_since',
+      'field_dues_paid_until',
+      'field_voice_part',
+    );
+    drupal_alter('mqsync_fields', $fields);
+  }
+  return $fields;
 }
 
 /**
@@ -218,6 +241,9 @@ function gs_mqsync_user_delete($account) {
 }
 
 
+
+
+
 /**
  * Manually grab any pending updates in the queue
  */
@@ -247,10 +273,12 @@ function gs_mqsync_process_queue() {
   }
   $channel = $connection->channel();
 
-  $channel->queue_declare('barbershop_nz', false, false, false, false);
+  $queue_name = _gs_mqsync_convert_domain_to_queue_name(g3core_get_domain());
+
+  $channel->queue_declare($queue_name, false, false, false, false);
 
   $created_count = $updated_count = $deleted_count = 0;
-  while( $msg = $channel->basic_get('barbershop_nz', true) ) {
+  while( $msg = $channel->basic_get($queue_name, true) ) {
     $package = unserialize($msg->body);
 
     switch($package['operation']) {
@@ -318,8 +346,8 @@ function gs_mqsync_process_person_update($update_package) {
       $user->status = 1;
       $user->name = strtolower("{$person->first_name}.{$person->last_name}");
       foreach($person->emails AS $e) {
-        if( $e['is_primary'] ) {
-          $user->mail = $e['email'];
+        if( $e->is_primary ) {
+          $user->mail = $e->email;
         }
       }
     }
@@ -328,12 +356,89 @@ function gs_mqsync_process_person_update($update_package) {
     $uw = entity_metadata_wrapper('user', $user);
     $uw->field_first_name = $person->first_name;
     $uw->field_last_name = $person->last_name;
+dpm($person);
+dpm($membership);
+
+    // field_address
+    $a = $person->field_address->und[0];
+    $user->field_address[LANGUAGE_NONE][0] = array(
+      'is_primary' => TRUE,
+      'street' => $a->street,
+      'city' => $a->city,
+      'province' => $a->province,
+      'postal_code' => $a->postal_code,
+      'country' => $a->country,
+    );
+
+    // birthday
+    if( !empty($person->birthday) ) {
+      $uw->field_birthday = strtotime($person->birthday);
+    }
+
+    // phones
+    foreach($person->phones AS $p) {
+      if( $p->type == 'home' ) {
+        $uw->field_home_phone = $p->phone;
+      }
+      if( $p->type == 'work' ) {
+        $uw->field_work_phone = $p->phone;
+      }
+      if( $p->type == 'mobile' ) {
+        $uw->field_mobile_phone = $p->phone;
+      }
+    }
+
+    // from the membership record:
+    // member id
+    $uw->field_member_id = $membership->member_id;
+    // membership start
+    if( !empty($membership->membership_start) ) {
+      $uw->field_member_since = strtotime($membership->membership_start);
+    }
+    // dues paid until
+    if( !empty($membership->dues_paid_until) ) {
+      $uw->field_dues_paid_until = strtotime($membership->dues_paid_until);
+    }
+
+    // membership end - not yet in the G3 data model
+    //$uw->field_member_since = $membership->field_membership_start;
+
+    // NB: DO NOT set the roles, because this would be a huge security gaffe.
+
+    // tags
+    foreach($membership->tags AS $t) {
+
+      // voice part
+      if( $t->vocab == 'voice_part' ) {
+        $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname", 
+                 array(':mname'=>$t->value))->fetchField();
+        if( $tid ) {
+          $uw->field_voice_part->set($tid);
+        } else {
+          watchdog('gs_mqsync', "Voice part machine name '{$t->value}' not found.");
+        }
+      }
+
+      // chapter role
+      if( $t->vocab == 'chapter_role' ) {
+        $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname", 
+                 array(':mname'=>$t->value))->fetchField();
+        if( $tid ) {
+          $uw->field_chapter_role->set($tid);
+        } else {
+          watchdog('gs_mqsync', "Voice part machine name '{$t->value}' not found.");
+        }
+
+      }
+    }
+
+    // chapter
 
     $uw->save();
 
   } catch( Exception $e ) {
-    $msg = t("Exception @msg on package: <pre>@package</pre>",
-             array('@msg'=>$e->getMessage(), '@package'=>print_r($update_package,TRUE)));
+    $msg = t("Exception '@msg' at @backtrace on package: <pre>@package</pre>",
+             array('@msg'=>$e->getMessage(), '@package'=>print_r($update_package,TRUE), '@backtrace'=>$e->getTraceAsString()));
     drupal_set_message($msg, 'error');
     watchdog('gs_mqsync', $msg);
   }
