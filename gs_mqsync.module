@@ -3,47 +3,6 @@
 static $connection;
 
 /**
- * Utils
- */
-
-/** 
- * Convert domain name to queue name
- */
-function _gs_mqsync_convert_domain_to_queue_name($domain) {
-  // strip off any prefix
-  $queue_name = str_replace('http://', '', $domain);
-  // replace dots with underscore
-  $queue_name = str_replace('.', '_', $queue_name);
-  // trim just in case
-  $queue_name = trim($queue_name);
-  return $queue_name;
-}
-
-
-// temporary menu item for testing
-function gs_mqsync_menu() {
-
-  // admin interface
-  $items['admin/config/groupanizer/sync'] = array(
-    'title' => 'Sync settings',
-    'page callback' => 'drupal_get_form',
-    'page arguments' => array('gs_mqsync_settings_form'),
-    'access arguments' => array('only user 1'),
-    'file' => 'gs_mqsync.admin.inc',
-  );
-
-  // TEMPORARY
-  $items['univrec'] = array(
-    'title' => "Receive updated from universe",
-    'page callback' => 'gs_mqsync_receive_updates',
-    'access arguments' => array('bypass node access'),
-    'type' => MENU_CALLBACK,
-  );
-
-  return $items;
-}
-
-/**
  * Utility functions
  */
 
@@ -88,6 +47,43 @@ function _gs_mqsync_fix_taxonomy($tax) {
   }
   return $tax;
 }
+
+/** 
+ * Convert domain name to queue name
+ */
+function _gs_mqsync_convert_domain_to_queue_name($domain) {
+  // strip off any prefix
+  $queue_name = str_replace('http://', '', $domain);
+  // replace dots with underscore
+  $queue_name = str_replace('.', '_', $queue_name);
+  // trim just in case
+  $queue_name = trim($queue_name);
+  return $queue_name;
+}
+
+
+function gs_mqsync_menu() {
+
+  // admin interface
+  $items['admin/config/groupanizer/sync'] = array(
+    'title' => 'Sync settings',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('gs_mqsync_settings_form'),
+    'access arguments' => array('only user 1'),
+    'file' => 'gs_mqsync.admin.inc',
+  );
+
+  // TEMPORARY
+  $items['univrec'] = array(
+    'title' => "Receive updated from universe",
+    'page callback' => 'gs_mqsync_receive_updates',
+    'access arguments' => array('bypass node access'),
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
 
 /**
  * hook_cron
@@ -200,6 +196,9 @@ function gs_mqsync_send_person($queue, $operation, $account) {
   if( isset($package->field_voice_part) ) {
     $package->field_voice_part = _gs_mqsync_fix_taxonomy($package->field_voice_part);
   }
+  if( isset($package->field_chapter_role) ) {
+    $package->field_chapter_role = _gs_mqsync_fix_taxonomy($package->field_chapter_role);
+  }
 
   gs_mqsync_send($queue, $operation, $package);
 }
@@ -307,6 +306,7 @@ function gs_mqsync_process_queue() {
   // shut down the channel now that we're done with it
   $channel->close();
   $connection->close();
+  unset($connection);
   
   return array(
     'created' => $created_count,
