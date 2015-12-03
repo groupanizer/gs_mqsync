@@ -132,22 +132,22 @@ function gs_mqsync_person_fields() {
   static $fields;
   if( !isset($fields) ) {
     $fields = array(
-      'uuid',
-      'name',
-      'pass',
-      'mail',
-      'roles',
-      'field_first_name',
-      'field_last_name',
-      'field_member_id',
-      'field_birthday',
-      'field_address',
-      'field_home_phone',
-      'field_work_phone',
-      'field_mobile_phone',
-      'field_member_since',
-      'field_dues_paid_until',
-      'field_voice_part',
+      array( 'name'=>'uuid', 'type'=>'scalar'),
+      array( 'name'=>'name', 'type'=>'scalar'),
+      array( 'name'=>'pass', 'type'=>'scalar'),
+      array( 'name'=>'mail', 'type'=>'scalar'),
+      array( 'name'=>'roles', 'type'=>'array'),
+      array( 'name'=>'field_first_name', 'type'=>'textfield'),
+      array( 'name'=>'field_last_name', 'type'=>'textfield'),
+      array( 'name'=>'field_member_id', 'type'=>'textfield'),
+      array( 'name'=>'field_birthday', 'type'=>'datefield'),
+      array( 'name'=>'field_address', 'type'=>'location'),
+      array( 'name'=>'field_home_phone', 'type'=>'textfield'),
+      array( 'name'=>'field_work_phone', 'type'=>'textfield'),
+      array( 'name'=>'field_mobile_phone', 'type'=>'textfield'),
+      array( 'name'=>'field_member_since', 'type'=>'datefield'),
+      array( 'name'=>'field_dues_paid_until', 'type'=>'datefield'),
+      array( 'name'=>'field_voice_part', 'type'=>'taxonomy'),
     );
     drupal_alter('mqsync_fields', $fields);
   }
@@ -163,54 +163,57 @@ function gs_mqsync_send_person($queue, $operation, $account) {
   $lang = isset($account->language) ? $account->language : LANGUAGE_NONE;
   $package = new StdClass();
 
-  foreach( gs_mqsync_person_fields() AS $field ) {
+  foreach( gs_mqsync_person_fields() AS $spec ) {
 
-    // don't send empty values, even if nested
-    // TODO: or should we...
-    if( empty($account->$field) ) { continue; }
-    else {
-      if( isset($account->{$field}[$lang]) && empty($account->{$field}[$lang]) ) continue;
-      if( isset($account->{$field}[LANGUAGE_NONE]) && empty($account->{$field}[LANGUAGE_NONE]) ) continue;
+    $field_type = $spec['type'];
+    $field = $spec['name'];
+
+    switch( $field_type ) {
+      case 'scalar':
+        $package->$field = $account->$field;
+        break;
+
+      case 'roles':
+        $package->$field = _gs_mqsync_fix_roles($account->$field);
+        break;
+
+      case 'textfield':
+        if( isset($account->{$field}[$lang]) ) {
+          $package->$field = $account->{$field}[$lang][0]['value'];
+        } else if( isset($account->{$field}[LANGUAGE_NONE]) ) {
+          $package->$field = $account->{$field}[LANGUAGE_NONE][0]['value'];
+        }
+        break;
+
+      case 'datefield':
+        if( isset($account->{$field}[$lang]) ) {
+          $package->$field = $account->{$field}[$lang][0]['value'];
+        } else if( isset($account->{$field}[LANGUAGE_NONE]) ) {
+          $package->$field = $account->{$field}[LANGUAGE_NONE][0]['value'];
+        }
+        break;
+
+      case 'location':
+        $package->$field = $account->{$field}[LANGUAGE_NONE][0];
+        // get rid of cruft
+        unset($package->{$field}['location_settings']);
+        break;
+
+      case 'taxonomy':
+        // pass the whole array
+        if( isset($account->{$field}[$lang] ) ) {
+          $package->$field = $account->{$field}[$lang];
+        } else if( isset($account->{$field}[LANGUAGE_NONE] ) ) {
+          $package->$field = $account->{$field}[LANGUAGE_NONE];
+        }
+        // substitute machine names
+        $package->$field = _gs_mqsync_fix_taxonomy($package->$field);
+        break;
+
+      default:
+        watchdog('gs_mqsync', "Unknown field type @type received - doing nothing.", array('@type'=>$field_type));
+        break;
     }
-
-    // first look for straight scalar values, like email and uuid
-    if( is_scalar($account->$field) ) {
-      $package->$field = $account->$field;
-    } 
-    // now look for a value field of the specified language
-    else if( isset($account->{$field}[$lang][0]['value']) ) {
-      $package->$field = $account->{$field}[$lang][0]['value'];
-    } 
-    else if( isset($account->{$field}[LANGUAGE_NONE][0]['value'] ) ) {
-      $package->$field = $account->{$field}[LANGUAGE_NONE][0]['value'];
-    } 
-    // otherwise just pass the whole array, either language
-    else if( isset($account->{$field}[$lang][0] ) ) {
-      $package->$field = $account->{$field}[$lang]; // NB: not just item zero
-    } 
-    else if( isset($account->{$field}[LANGUAGE_NONE][0] ) ) {
-      $package->$field = $account->{$field}[LANGUAGE_NONE]; // NB: not just item zero
-    }
-    // if we fall through to here, just pass through (eg. for roles)
-    else {
-      $package->$field = $account->$field;
-    }
-  }
-
-  // get rid of cruft on the address field
-  if( isset($package->field_address) ) {
-    unset($package->field_address['location_settings']);
-  }
-
-  // machine name substitutions for some fields
-  if( isset($package->roles) ) {
-    $package->roles = _gs_mqsync_fix_roles($package->roles);
-  }
-  if( isset($package->field_voice_part) ) {
-    $package->field_voice_part = _gs_mqsync_fix_taxonomy($package->field_voice_part);
-  }
-  if( isset($package->field_chapter_role) ) {
-    $package->field_chapter_role = _gs_mqsync_fix_taxonomy($package->field_chapter_role);
   }
 
   gs_mqsync_send($queue, $operation, $package);
@@ -369,8 +372,6 @@ function gs_mqsync_process_person_update($update_package) {
     $uw = entity_metadata_wrapper('user', $user);
     $uw->field_first_name = $person->first_name;
     $uw->field_last_name = $person->last_name;
-dpm($person);
-dpm($membership);
 
     // field_address
     $a = $person->field_address->und[0];
@@ -419,6 +420,11 @@ dpm($membership);
     // NB: DO NOT set the roles, because this would be a huge security gaffe.
 
     // tags
+
+    // it's necessary to clear out the chapter role before we start, or we'll just collect
+    // values forever
+    $uw->field_chapter_role = array();
+
     foreach($membership->tags AS $t) {
 
       // voice part
@@ -432,12 +438,12 @@ dpm($membership);
         }
       }
 
-      // chapter role
+      // chapter role (multi-value)
       if( $t->vocab == 'chapter_role' ) {
         $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname", 
                  array(':mname'=>$t->value))->fetchField();
         if( $tid ) {
-          $uw->field_chapter_role->set($tid);
+          $uw->field_chapter_role[] =$tid;
         } else {
           watchdog('gs_mqsync', "Voice part machine name '{$t->value}' not found.");
         }
