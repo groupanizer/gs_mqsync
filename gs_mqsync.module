@@ -41,10 +41,20 @@ function _gs_mqsync_fix_roles($roles) {
  * Substitute term machine names for terms
  */
 function _gs_mqsync_fix_taxonomy($tax) {
+  // for single values
   if( isset($tax['tid']) ) {
     return db_query("SELECT machine_name FROM taxonomy_term_data WHERE tid = :tid",
       array(':tid'=>$tax['tid']))->fetchField();
   }
+  // multi-value term reference fields
+  if( isset($tax[0]['tid']) ) {
+    $r = array();
+    foreach($tax AS $t) {
+      $r[] = _gs_mqsync_fix_taxonomy($t);
+    }
+    return $r;
+  }
+  // return whatever this was unchanged
   return $tax;
 }
 
@@ -152,8 +162,11 @@ function gs_mqsync_send_person($queue, $operation, $account) {
   // just the fields we care about, and grab the best language
   $lang = isset($account->language) ? $account->language : LANGUAGE_NONE;
   $package = new StdClass();
+
   foreach( gs_mqsync_person_fields() AS $field ) {
+
     // don't send empty values, even if nested
+    // TODO: or should we...
     if( empty($account->$field) ) { continue; }
     else {
       if( isset($account->{$field}[$lang]) && empty($account->{$field}[$lang]) ) continue;
@@ -173,10 +186,10 @@ function gs_mqsync_send_person($queue, $operation, $account) {
     } 
     // otherwise just pass the whole array, either language
     else if( isset($account->{$field}[$lang][0] ) ) {
-      $package->$field = $account->{$field}[$lang][0];
+      $package->$field = $account->{$field}[$lang]; // NB: not just item zero
     } 
     else if( isset($account->{$field}[LANGUAGE_NONE][0] ) ) {
-      $package->$field = $account->{$field}[LANGUAGE_NONE][0];
+      $package->$field = $account->{$field}[LANGUAGE_NONE]; // NB: not just item zero
     }
     // if we fall through to here, just pass through (eg. for roles)
     else {
