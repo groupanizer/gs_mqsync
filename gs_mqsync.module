@@ -7,6 +7,30 @@ static $connection;
  */
 
 /**
+ * Find a node representing a chapter, with a URL that matches the update origin
+ */
+function _gs_mqsync_find_chapter($url) {
+  // normalize
+  $url = str_ireplace('http://', '', $url);
+
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'node');
+  $query->entityCondition('bundle', 'go_chapter');
+  $query->fieldCondition('field_member_url', 'url', '%'.$url, 'LIKE');
+  $result = $query->execute();
+
+  if( isset($result['node']) ) {
+    $list = array_keys($result['node']);
+    $chapter = node_load(reset($list));
+    return $chapter;
+  } else {
+    watchdog('gs_mqsync', "No chapter was found with member URL like {$url}");
+  }
+
+  return null;
+}
+
+/**
  * semaphore to prevent loops while receiving a sync
  * - call with argument to set
  * - call with no argument to read
@@ -136,7 +160,7 @@ function gs_mqsync_person_fields() {
       array( 'name'=>'name', 'type'=>'scalar'),
       array( 'name'=>'pass', 'type'=>'scalar'),
       array( 'name'=>'mail', 'type'=>'scalar'),
-      array( 'name'=>'roles', 'type'=>'array'),
+      array( 'name'=>'roles', 'type'=>'roles'),
       array( 'name'=>'field_first_name', 'type'=>'textfield'),
       array( 'name'=>'field_last_name', 'type'=>'textfield'),
       array( 'name'=>'field_member_id', 'type'=>'textfield'),
@@ -178,25 +202,27 @@ function gs_mqsync_send_person($queue, $operation, $account) {
         break;
 
       case 'textfield':
-        if( isset($account->{$field}[$lang]) ) {
+        if( isset($account->{$field}[$lang][0]) ) {
           $package->$field = $account->{$field}[$lang][0]['value'];
-        } else if( isset($account->{$field}[LANGUAGE_NONE]) ) {
+        } else if( isset($account->{$field}[LANGUAGE_NONE][0]) ) {
           $package->$field = $account->{$field}[LANGUAGE_NONE][0]['value'];
         }
         break;
 
       case 'datefield':
-        if( isset($account->{$field}[$lang]) ) {
+        if( isset($account->{$field}[$lang][0]) ) {
           $package->$field = $account->{$field}[$lang][0]['value'];
-        } else if( isset($account->{$field}[LANGUAGE_NONE]) ) {
+        } else if( isset($account->{$field}[LANGUAGE_NONE][0]) ) {
           $package->$field = $account->{$field}[LANGUAGE_NONE][0]['value'];
         }
         break;
 
       case 'location':
-        $package->$field = $account->{$field}[LANGUAGE_NONE][0];
-        // get rid of cruft
-        unset($package->{$field}['location_settings']);
+        if( isset($account->{$field}[LANGUAGE_NONE][0]) ) {
+          $package->$field = $account->{$field}[LANGUAGE_NONE][0];
+          // get rid of cruft
+          unset($package->{$field}['location_settings']);
+        }
         break;
 
       case 'taxonomy':
@@ -277,19 +303,20 @@ function gs_mqsync_receive_updates() {
 
 function gs_mqsync_process_queue() {
 
+  // don't do this if we're not set up to receive
   if( !variable_get('gs_mqsync_sync_receive', TRUE) ) return;
-
+  // set the flag that will prevent these from going back out and making a loop
   _gs_mqsync_receiving(TRUE);
 
-  global $connection;
 
+  global $connection;
   if( !isset($connection) ) {
     $connection = RabbitMQConnection::get();
   }
   $channel = $connection->channel();
 
+  // get our queue
   $queue_name = _gs_mqsync_convert_domain_to_queue_name(g3core_get_domain());
-
   $channel->queue_declare($queue_name, false, false, false, false);
 
   $created_count = $updated_count = $deleted_count = 0;
@@ -317,6 +344,8 @@ function gs_mqsync_process_queue() {
         watchdog('gs_mqsync', "Unknown operation @op received - doing nothing.", array('@op'=>$data['operation']));
         break;
     }
+
+
   }
 
   // shut down the channel now that we're done with it
@@ -361,6 +390,9 @@ function gs_mqsync_process_person_update($update_package) {
       // some fields that should only be set on creation
       $user->status = 1;
       $user->name = strtolower("{$person->first_name}.{$person->last_name}");
+
+      // email handling
+      // TODO: detect possible collisions, and maybe merge the records or flag them to merge
       foreach($person->emails AS $e) {
         if( $e->is_primary ) {
           $user->mail = $e->email;
@@ -402,56 +434,44 @@ function gs_mqsync_process_person_update($update_package) {
       }
     }
 
-    // from the membership record:
-    // member id
+    // member id - take the latest value, because it's the org ID - it should always match
     $uw->field_member_id = $membership->member_id;
-    // membership start
-    if( !empty($membership->membership_start) ) {
+
+    $org_site = module_exists('go_membership');
+
+    // do these updates only if we're NOT on an org site. They are handled specially if
+    // we do have an org site.
+    if( !$org_site ) {
+      // simple fields
       $uw->field_member_since = strtotime($membership->membership_start);
-    }
-    // dues paid until
-    if( !empty($membership->dues_paid_until) ) {
       $uw->field_dues_paid_until = strtotime($membership->dues_paid_until);
-    }
 
-    // membership end - not yet in the G3 data model
-    //$uw->field_member_since = $membership->field_membership_start;
+      // tags
+      foreach($membership->tags AS $t) {
 
-    // NB: DO NOT set the roles, because this would be a huge security gaffe.
-
-    // tags
-
-    // it's necessary to clear out the chapter role before we start, or we'll just collect
-    // values forever
-    $uw->field_chapter_role = array();
-
-    foreach($membership->tags AS $t) {
-
-      // voice part
-      if( $t->vocab == 'voice_part' ) {
-        $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname", 
-                 array(':mname'=>$t->value))->fetchField();
-        if( $tid ) {
-          $uw->field_voice_part->set($tid);
-        } else {
-          watchdog('gs_mqsync', "Voice part machine name '{$t->value}' not found.");
-        }
-      }
-
-      // chapter role (multi-value)
-      if( $t->vocab == 'chapter_role' ) {
-        $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname", 
-                 array(':mname'=>$t->value))->fetchField();
-        if( $tid ) {
-          $uw->field_chapter_role[] =$tid;
-        } else {
-          watchdog('gs_mqsync', "Voice part machine name '{$t->value}' not found.");
+        // voice part
+        if( $t->vocab == 'voice_part' ) {
+          $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname", 
+                   array(':mname'=>$t->value))->fetchField();
+          if( $tid ) {
+            $uw->field_voice_part->set($tid);
+          } else {
+            watchdog('gs_mqsync', "Voice part machine name '{$t->value}' not found.");
+          }
         }
 
+        // chapter role (multi-value)
+        if( $t->vocab == 'chapter_role' ) {
+          $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname", 
+                   array(':mname'=>$t->value))->fetchField();
+          if( $tid ) {
+            $uw->field_chapter_role[] =$tid;
+          } else {
+            watchdog('gs_mqsync', "Voice part machine name '{$t->value}' not found.");
+          }
+        }
       }
     }
-
-    // chapter
 
     $uw->save();
 
@@ -462,7 +482,107 @@ function gs_mqsync_process_person_update($update_package) {
     watchdog('gs_mqsync', $msg);
   }
 
+
+  if( $org_site ) {
+    $origin_domain = $update_package['update_origin'];
+    gs_mqsync_process_membership($user, $membership, $origin_domain);
+  }
+
   return $created;
+}
+
+/**
+ * If this is an org site, we need to find or create a membership record to connect
+ * this user with a chapter record.
+ */
+function gs_mqsync_process_membership($user, $membership, $origin_domain) {
+
+  $url = str_ireplace('http://', '', $origin_domain);
+
+  // find a matching chapter record, or create one
+  $chapter = _gs_mqsync_find_chapter( $url );
+
+  if( !$chapter && variable_get('gs_mqsync_sync_create_chapters', TRUE) ) {
+    $chapter = new StdClass();
+    $chapter->type = 'go_chapter';
+    $chapter->title = "Auto created for {$url}";
+    node_object_prepare($chapter);
+    $chapter->field_member_url[LANGUAGE_NONE][0]['url'] = $url;
+    node_save($chapter);
+  }
+
+  // if there's no chapter found or created, there's nothing left to do
+  if( !$chapter ) return;
+
+  // find or create a membership record
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'go_membership');
+  $query->propertyCondition('user_uid', $user->uid);
+  $query->propertyCondition('chapter_nid', $chapter->nid);
+  $result = $query->execute();
+  if( isset($result['go_membership']) ) {
+    $list = entity_load('go_membership', array_keys($result['go_membership']));
+    $org_membership = reset($list);
+  } else {
+    $org_membership = entity_create('go_membership', array('type'=>'go_membership'));
+    $org_membership->user_uid = $user->uid;
+    $org_membership->chapter_nid = $chapter->nid;
+  }
+
+  // set the fields on this membership and save
+  $org_membership->label = "{$user->name} belongs to {$chapter->title}";
+  $org_membership->login_name = $membership->login_name;
+  $org_membership->login_pass = $membership->login_pass;
+  $org_membership->member_id = $membership->member_id;
+  $org_membership->membership_start = $membership->membership_start;
+  $org_membership->membership_end = $membership->membership_end;
+  $org_membership->dues_paid_until = $membership->dues_paid_until;
+
+  $org_membership->save();
+
+  // roles
+  if( isset($membership->roles) ) {
+    $query = db_insert('go_membership_role')->fields(array('gomid', 'role'));
+    foreach($membership->roles AS $role_name) {
+      $query->values(array('gomid'=>$org_membership->gomid, 'role'=>$role_name));
+    }
+    $query->execute();
+  }
+
+  // tags
+  db_query("DELETE from go_membership_tag WHERE gomid = :gomid", array(':gomid'=>$org_membership->gomid));
+  $query = db_insert('go_membership_tag')->fields(array('gomid', 'vocab', 'value'));
+  foreach($membership->tags AS $t) {
+    $query->values(array(
+      'gomid'=>$org_membership->gomid,
+      'vocab'=>$t->vocab,
+      'value'=>$t->value,
+    ));
+  }
+  $query->execute();
+
+
+  // special field handling on the user, taking into account the semantics of each field
+  $uw = entity_metadata_wrapper('user', $user);
+
+  // membership start - take the earliest value from all membership records for this person
+  $earliest = db_query(
+    "SELECT MIN(membership_start) FROM go_membership 
+     WHERE user_uid = :user_uid AND NOT membership_start IS NULL",
+    array(':user_uid'=>$user->uid)
+  )->fetchField();
+  //$uw->field_member_since = $earliest;
+
+  // membership end - set it when last membership is deleted (field currently does not exist)
+  // TODO: do something with this
+
+  // tags: voice part - just take the latest value. Doesn't matter much.
+  //$uw->field_voice_part->set($tid);
+
+  // tags: chapter role - set it to the union of all values
+  //$uw->field_chapter_role = array();
+
+  $uw->save;
 }
 
 /**
