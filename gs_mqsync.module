@@ -447,6 +447,7 @@ function gs_mqsync_process_person_update($update_package) {
       $uw->field_dues_paid_until = strtotime($membership->dues_paid_until);
 
       // tags
+      $uw->field_chapter_role = array();
       foreach($membership->tags AS $t) {
 
         // voice part
@@ -465,7 +466,7 @@ function gs_mqsync_process_person_update($update_package) {
           $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname", 
                    array(':mname'=>$t->value))->fetchField();
           if( $tid ) {
-            $uw->field_chapter_role[] =$tid;
+            $uw->field_chapter_role[] = $tid;
           } else {
             watchdog('gs_mqsync', "Voice part machine name '{$t->value}' not found.");
           }
@@ -514,75 +515,91 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
   // if there's no chapter found or created, there's nothing left to do
   if( !$chapter ) return;
 
-  // find or create a membership record
-  $query = new EntityFieldQuery();
-  $query->entityCondition('entity_type', 'go_membership');
-  $query->propertyCondition('user_uid', $user->uid);
-  $query->propertyCondition('chapter_nid', $chapter->nid);
-  $result = $query->execute();
-  if( isset($result['go_membership']) ) {
-    $list = entity_load('go_membership', array_keys($result['go_membership']));
-    $org_membership = reset($list);
-  } else {
-    $org_membership = entity_create('go_membership', array('type'=>'go_membership'));
-    $org_membership->user_uid = $user->uid;
-    $org_membership->chapter_nid = $chapter->nid;
-  }
+  try {
 
-  // set the fields on this membership and save
-  $org_membership->label = "{$user->name} belongs to {$chapter->title}";
-  $org_membership->login_name = $membership->login_name;
-  $org_membership->login_pass = $membership->login_pass;
-  $org_membership->member_id = $membership->member_id;
-  $org_membership->membership_start = $membership->membership_start;
-  $org_membership->membership_end = $membership->membership_end;
-  $org_membership->dues_paid_until = $membership->dues_paid_until;
+    // find or create a membership record
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'go_membership');
+    $query->propertyCondition('user_uid', $user->uid);
+    $query->propertyCondition('chapter_nid', $chapter->nid);
+    $result = $query->execute();
+    if( isset($result['go_membership']) ) {
+      $list = entity_load('go_membership', array_keys($result['go_membership']));
+      $org_membership = reset($list);
+    } else {
+      $org_membership = entity_create('go_membership', array('type'=>'go_membership'));
+      $org_membership->user_uid = $user->uid;
+      $org_membership->chapter_nid = $chapter->nid;
+    }
 
-  $org_membership->save();
+    // set the fields on this membership and save
+    $org_membership->label = "{$user->name} belongs to {$chapter->title}";
+    $org_membership->login_name = $membership->login_name;
+    $org_membership->login_pass = $membership->login_pass;
+    $org_membership->member_id = $membership->member_id;
+    $org_membership->membership_start = $membership->membership_start;
+    $org_membership->membership_end = $membership->membership_end;
+    $org_membership->dues_paid_until = $membership->dues_paid_until;
 
-  // roles
-  if( isset($membership->roles) ) {
-    $query = db_insert('go_membership_role')->fields(array('gomid', 'role'));
-    foreach($membership->roles AS $role_name) {
-      $query->values(array('gomid'=>$org_membership->gomid, 'role'=>$role_name));
+    $org_membership->save();
+
+dpm($membership);
+dpm($org_membership);
+    // roles
+dpm("deleting roles from {$org_membership->gomid}");
+    db_query("DELETE from go_membership_role WHERE gomid = :gomid", array(':gomid'=>$org_membership->gomid));
+    if( isset($membership->roles) ) {
+      $query = db_insert('go_membership_role')->fields(array('gomid', 'role'));
+      foreach($membership->roles AS $role_name) {
+        $query->values(array('gomid'=>$org_membership->gomid, 'role'=>$role_name));
+      }
+      $query->execute();
+    }
+
+    // tags
+dpm("deleting tags from {$org_membership->gomid}");
+    db_query("DELETE from go_membership_tag WHERE gomid = :gomid", array(':gomid'=>$org_membership->gomid));
+    $query = db_insert('go_membership_tag')->fields(array('gomid', 'vocab', 'value'));
+    foreach($membership->tags AS $t) {
+      $query->values(array(
+        'gomid'=>$org_membership->gomid,
+        'vocab'=>$t->vocab,
+        'value'=>$t->value,
+      ));
     }
     $query->execute();
+
+
+    // special field handling on the user, taking into account the semantics of each field
+    $uw = entity_metadata_wrapper('user', $user);
+
+    // membership start - take the earliest value from all membership records for this person
+    $earliest = db_query(
+      "SELECT MIN(membership_start) FROM go_membership 
+       WHERE user_uid = :user_uid AND NOT membership_start IS NULL",
+      array(':user_uid'=>$user->uid)
+    )->fetchField();
+    $uw->field_member_since = strtotime($earliest);
+
+    // membership end - set it when last membership is deleted (field currently does not exist)
+    // TODO: do something with this
+
+    // process tags
+
+    // tags: voice part - just take the latest value. Doesn't matter much.
+    //$uw->field_voice_part->set($tid);
+
+    // tags: chapter role - set it to the union of all values
+    //$uw->field_chapter_role = array();
+
+    $uw->save();
+
+  } catch( Exception $e ) {
+    $msg = t("Exception '@msg' at @backtrace on package: <pre>@package</pre>",
+             array('@msg'=>$e->getMessage(), '@package'=>print_r($update_package,TRUE), '@backtrace'=>$e->getTraceAsString()));
+    drupal_set_message($msg, 'error');
+    watchdog('gs_mqsync', $msg);
   }
-
-  // tags
-  db_query("DELETE from go_membership_tag WHERE gomid = :gomid", array(':gomid'=>$org_membership->gomid));
-  $query = db_insert('go_membership_tag')->fields(array('gomid', 'vocab', 'value'));
-  foreach($membership->tags AS $t) {
-    $query->values(array(
-      'gomid'=>$org_membership->gomid,
-      'vocab'=>$t->vocab,
-      'value'=>$t->value,
-    ));
-  }
-  $query->execute();
-
-
-  // special field handling on the user, taking into account the semantics of each field
-  $uw = entity_metadata_wrapper('user', $user);
-
-  // membership start - take the earliest value from all membership records for this person
-  $earliest = db_query(
-    "SELECT MIN(membership_start) FROM go_membership 
-     WHERE user_uid = :user_uid AND NOT membership_start IS NULL",
-    array(':user_uid'=>$user->uid)
-  )->fetchField();
-  //$uw->field_member_since = $earliest;
-
-  // membership end - set it when last membership is deleted (field currently does not exist)
-  // TODO: do something with this
-
-  // tags: voice part - just take the latest value. Doesn't matter much.
-  //$uw->field_voice_part->set($tid);
-
-  // tags: chapter role - set it to the union of all values
-  //$uw->field_chapter_role = array();
-
-  $uw->save;
 }
 
 /**
