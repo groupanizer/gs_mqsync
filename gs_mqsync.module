@@ -219,7 +219,10 @@ function gs_mqsync_send_person($queue, $operation, $account) {
         break;
 
       case 'file':
-        $package->$field = file_create_url($account->{$field}->uri);
+        // let's be careful that it's a real file before we send it
+        if( isset($account->{$field}->uri) && file_exists($account->{$field}->uri) ) {
+          $package->$field = file_create_url($account->{$field}->uri);
+        }
         break;
 
       case 'location':
@@ -443,6 +446,16 @@ function gs_mqsync_process_person_update($update_package) {
     // member id - take the latest value, because it's the org ID - it should always match
     $uw->field_member_id = $membership->member_id;
 
+    // picture if we've got one
+    if( isset($person->picture_url) ) {
+      $pictures_dir = 'public://' . variable_get('user_pictures_path', 'pictures');
+      file_prepare_directory($pictures_dir, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS);
+      $file = system_retrieve_file($person->picture_url, $pictures_dir, TRUE, FILE_EXISTS_REPLACE);
+      if( $file ) {
+        $user->picture = $file;
+      }
+    }
+
     $org_site = module_exists('go_membership');
 
     // do these updates only if we're NOT on an org site. They are handled specially if
@@ -549,10 +562,7 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
 
     $org_membership->save();
 
-dpm($membership);
-dpm($org_membership);
     // roles
-dpm("deleting roles from {$org_membership->gomid}");
     db_query("DELETE from go_membership_role WHERE gomid = :gomid", array(':gomid'=>$org_membership->gomid));
     if( isset($membership->roles) ) {
       $query = db_insert('go_membership_role')->fields(array('gomid', 'role'));
@@ -563,7 +573,6 @@ dpm("deleting roles from {$org_membership->gomid}");
     }
 
     // tags
-dpm("deleting tags from {$org_membership->gomid}");
     db_query("DELETE from go_membership_tag WHERE gomid = :gomid", array(':gomid'=>$org_membership->gomid));
     $query = db_insert('go_membership_tag')->fields(array('gomid', 'vocab', 'value'));
     foreach($membership->tags AS $t) {
@@ -574,7 +583,6 @@ dpm("deleting tags from {$org_membership->gomid}");
       ));
     }
     $query->execute();
-
 
     // special field handling on the user, taking into account the semantics of each field
     $uw = entity_metadata_wrapper('user', $user);
