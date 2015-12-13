@@ -160,7 +160,7 @@ function gs_mqsync_person_fields() {
       array( 'name'=>'name', 'type'=>'scalar'),
       array( 'name'=>'pass', 'type'=>'scalar'),
       array( 'name'=>'mail', 'type'=>'scalar'),
-      array( 'name'=>'picture', 'type'=>'scalar'),
+      array( 'name'=>'picture', 'type'=>'file'),
       array( 'name'=>'roles', 'type'=>'roles'),
       array( 'name'=>'field_first_name', 'type'=>'textfield'),
       array( 'name'=>'field_last_name', 'type'=>'textfield'),
@@ -216,6 +216,10 @@ function gs_mqsync_send_person($queue, $operation, $account) {
         } else if( isset($account->{$field}[LANGUAGE_NONE][0]) ) {
           $package->$field = $account->{$field}[LANGUAGE_NONE][0]['value'];
         }
+        break;
+
+      case 'file':
+        $package->$field = file_create_url($account->{$field});
         break;
 
       case 'location':
