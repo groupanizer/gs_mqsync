@@ -160,6 +160,7 @@ function gs_mqsync_person_fields() {
       array( 'name'=>'name', 'type'=>'scalar'),
       array( 'name'=>'pass', 'type'=>'scalar'),
       array( 'name'=>'mail', 'type'=>'scalar'),
+      array( 'name'=>'picture', 'type'=>'scalar'),
       array( 'name'=>'roles', 'type'=>'roles'),
       array( 'name'=>'field_first_name', 'type'=>'textfield'),
       array( 'name'=>'field_last_name', 'type'=>'textfield'),
