@@ -390,7 +390,6 @@ function gs_mqsync_process_person_update($update_package) {
       // some fields that should only be set on creation
       $user->status = 1;
       $user->name = strtolower("{$person->first_name}.{$person->last_name}");
-
       // email handling
       // TODO: detect possible collisions, and maybe merge the records or flag them to merge
       foreach($person->emails AS $e) {
@@ -398,6 +397,8 @@ function gs_mqsync_process_person_update($update_package) {
           $user->mail = $e->email;
         }
       }
+      // give this account the default roles
+      $user->roles = variable_get('gs_mqsync_default_roles', array(4190371=>4190371));
     }
 
     // now update remaining fields and save the user object
