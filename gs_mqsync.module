@@ -219,7 +219,7 @@ function gs_mqsync_send_person($queue, $operation, $account) {
         break;
 
       case 'file':
-        $package->$field = file_create_url($account->{$field});
+        $package->$field = file_create_url($account->{$field}->uri);
         break;
 
       case 'location':
