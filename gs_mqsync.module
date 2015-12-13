@@ -452,7 +452,10 @@ function gs_mqsync_process_person_update($update_package) {
       file_prepare_directory($pictures_dir, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS);
       $file = system_retrieve_file($person->picture_url, $pictures_dir, TRUE, FILE_EXISTS_REPLACE);
       if( $file ) {
-        $user->picture = $file;
+        $errors = file_validate_is_image($file);
+        if( empty($errors) ) {
+          $user->picture = $file;
+        }
       }
     }
 
@@ -603,10 +606,40 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
     // process tags
 
     // tags: voice part - just take the latest value. Doesn't matter much.
-    //$uw->field_voice_part->set($tid);
+    $vid = db_query("SELECT vid FROM taxonomy_vocabulary WHERE machine_name = 'sections'")->fetchField();
+    $tid = db_query(
+     "SELECT DISTINCT td.tid
+      FROM go_membership g
+      JOIN go_membership_tag gt ON (g.gomid = gt.gomid)
+      JOIN taxonomy_term_data td ON (gt.value = td.machine_name)
+      WHERE 1=1
+      AND g.user_uid = :uid
+      AND td.vid = :vid
+      AND gt.vocab = 'voice_part'
+      LIMIT 1",
+      array(':uid'=>$user->uid, ':vid'=>$vid)
+    )->fetchField();
+    if( $tid ) {
+      $uw->field_voice_part->set($tid);
+    } else {
+      $uw->field_voice_part->set(0);
+    }
 
     // tags: chapter role - set it to the union of all values
-    //$uw->field_chapter_role = array();
+    $vid = db_query("SELECT vid FROM taxonomy_vocabulary WHERE machine_name = 'chapter_role'")->fetchField();
+    $tids = db_query(
+     "SELECT td.tid
+      FROM go_membership g
+      JOIN go_membership_tag gt ON (g.gomid = gt.gomid)
+      JOIN taxonomy_term_data td ON (gt.value = td.machine_name)
+      WHERE 1=1
+      AND g.user_uid = :uid
+      AND td.vid = :vid
+      AND gt.vocab = 'chapter_role'",
+      array(':uid'=>$user->uid, ':vid'=>$vid)
+    )->fetchCol();
+    $uw->field_chapter_role = $tids;
+
 
     $uw->save();
 
