@@ -593,7 +593,9 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
        WHERE user_uid = :user_uid AND NOT membership_start IS NULL",
       array(':user_uid'=>$user->uid)
     )->fetchField();
-    $uw->field_member_since = strtotime($earliest);
+    if( $earliest ) {
+      $uw->field_member_since = strtotime($earliest);
+    }
 
     // membership end - set it when last membership is deleted (field currently does not exist)
     // TODO: do something with this
