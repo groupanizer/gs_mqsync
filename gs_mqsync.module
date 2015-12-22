@@ -138,13 +138,13 @@ function gs_mqsync_send($queue, $operation, $package) {
     $connection = RabbitMQConnection::get();
   }
   $channel = $connection->channel();
-  $channel->queue_declare('universe_user', false, false, false, false);
+  $channel->queue_declare($queue, false, false, false, false);
   $msg = new  AMQPMessage(serialize(array(
     'operation' => $operation,
     'domain' => g3core_get_domain(),
     'data' => $package,
   )));
-  $channel->basic_publish($msg, '', 'universe_user');
+  $channel->basic_publish($msg, '', $queue);
   
 }
 
@@ -253,12 +253,18 @@ function gs_mqsync_send_person($queue, $operation, $account) {
   gs_mqsync_send($queue, $operation, $package);
 }
 
+
+/**
+ * hooks that cause sending
+ */
+
+
 /**
  * hook_user_insert
  */
 function gs_mqsync_user_insert(&$edit, $account, $category) {
   if( !variable_get('gs_mqsync_sync_send', TRUE) || _gs_mqsync_receiving() ) return;
-  gs_mqsync_send_person('user', 'create', $account);
+  gs_mqsync_send_person('universe_user', 'create', $account);
 }
 
 /**
@@ -266,19 +272,9 @@ function gs_mqsync_user_insert(&$edit, $account, $category) {
  */
 function gs_mqsync_user_update(&$edit, $account, $category) {
   if( !variable_get('gs_mqsync_sync_send', TRUE) || _gs_mqsync_receiving() ) return;
+  gs_mqsync_send_person('universe_user', 'update', $account);
 
-// for now just send it all the time
-gs_mqsync_send_person('user', 'update', $account);
-return;
-
-// later we'll skip sending if nothing changed
-  foreach( gs_mqsync_person_fields() AS $field ) {
-    if( !isset($account->$field) ) continue;
-    if( $account->$field != $account->original->$field ) {
-      gs_mqsync_send_person('user', 'update', $account);
-      return;
-    }
-  }
+  // TODO: potentially prevent sending this record of nothing material changed
 }
 
 /**
@@ -286,10 +282,23 @@ return;
  */
 function gs_mqsync_user_delete($account) {
   if( !variable_get('gs_mqsync_sync_send', TRUE) || _gs_mqsync_receiving() ) return;
-  gs_mqsync_send('user', 'delete', $account->uuid);
+  gs_mqsync_send('universe_user', 'delete', $account->uuid);
 }
 
-
+/**
+ * hook_entity_insert / update
+ * @purpose catch metadata creates and updates, and send to universe
+ */
+function gs_mqsync_entity_insert($entity) {
+  if( !variable_get('gs_mqsync_sync_send', TRUE) || _gs_mqsync_receiving() ) return;
+  gs_mqsync_send('universe_metadata', 'insert', $entity);
+}
+function gs_mqsync_entity_update($entity) {
+  if( !variable_get('gs_mqsync_sync_send', TRUE) || _gs_mqsync_receiving() ) return;
+  unset($entity->original);
+  // TODO: potentially prevent sending this record of nothing material changed
+  gs_mqsync_send('universe_metadata', 'update', $entity);
+}
 
 
 
@@ -333,7 +342,10 @@ function gs_mqsync_process_queue() {
 
     switch($package['operation']) {
       case 'person_update':
-        $created = gs_mqsync_process_person_update($package['data']);
+        $membership = $update_package['membership'];
+        $person = $update_package['person'];
+        $origin_domain = $update_package['update_origin'];
+        $created = gs_mqsync_process_person_update($person, $membership, $origin_domain);
         if( $created ) {
           $created_count++;
         } else {
@@ -341,8 +353,21 @@ function gs_mqsync_process_queue() {
         }
         break;
 
+      // NB: this will only ever have an impact on an org site, because we never
+      // allow remote deletion of people from a G3 site
       case 'person_delete':
-        $deleted = gu_mqsync_process_person_delete($package['data']);
+        $person_uuid = $package['person_uuid'];
+        $origin_domain = $update_package['update_origin'];
+        $deleted = gs_mqsync_process_person_delete($person_uuid, $origin_domain);
+        if( $deleted ) {
+          $deleted_count++;
+        }
+        break;
+
+      case 'metadata_update':
+        $gu_group_data = $update_package['metadata'];
+        $origin_domain = $update_package['update_origin'];
+        $deleted = gs_mqsync_process_metadata_update($gu_group_data, $origin_domain);
         if( $deleted ) {
           $deleted_count++;
         }
@@ -372,12 +397,9 @@ function gs_mqsync_process_queue() {
  * Process an incoming person record from Universe
  * @return TRUE if we created a new record, FALSE for an update
  */
-function gs_mqsync_process_person_update($update_package) {
+function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
 
   try {
-
-    $membership = $update_package['membership'];
-    $person = $update_package['person'];
 
     // first let's see if we've already got a record for this person, by UUID
     $uuid = $person->uuid;
@@ -507,7 +529,6 @@ function gs_mqsync_process_person_update($update_package) {
 
 
   if( $org_site ) {
-    $origin_domain = $update_package['update_origin'];
     gs_mqsync_process_membership($user, $membership, $origin_domain);
   }
 
@@ -520,9 +541,8 @@ function gs_mqsync_process_person_update($update_package) {
  */
 function gs_mqsync_process_membership($user, $membership, $origin_domain) {
 
-  $url = str_ireplace('http://', '', $origin_domain);
-
   // find a matching chapter record, or create one
+  $url = str_ireplace('http://', '', $origin_domain);
   $chapter = _gs_mqsync_find_chapter( $url );
 
   if( !$chapter && variable_get('gs_mqsync_sync_create_chapters', TRUE) ) {
@@ -638,7 +658,11 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
       AND gt.vocab = 'chapter_role'",
       array(':uid'=>$user->uid, ':vid'=>$vid)
     )->fetchCol();
-    $uw->field_chapter_role = $tids;
+    if( $tids ) {
+      $uw->field_chapter_role = $tids;
+    } else {
+      $uw->field_chapter_role = array();
+    }
 
 
     $uw->save();
@@ -654,7 +678,50 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
 /**
  * Process an incoming person delete record from Universe
  */
-function gu_mqsync_process_person_delete($delete_package) {
-  dpm($delete_package);
-  return TRUE;
+function gs_mqsync_process_person_delete($person_uuid, $origin_domain) {
+  $org_site = module_exists('go_membership');
+  if( !$org_site ) { return; }
+
+  // look up the person by UUID and simply remove the membership to the sending domain
+  $url = str_ireplace('http://', '', $origin_domain);
+  $chapter = _gs_mqsync_find_chapter( $url );
+  if( $chapter ) {
+
+    // find and remove the membership
+
+    // possibly set membership end date
+ 
+  }
+}
+
+
+/**
+ * Process an incoming person delete record from Universe
+ */
+function gs_mqsync_process_metadata_update($gu_group_data, $origin_domain) {
+  $org_site = module_exists('go_membership');
+  if( !$org_site ) { return; }
+
+  // look up the person by UUID and simply remove the membership to the sending domain
+  $url = str_ireplace('http://', '', $origin_domain);
+  $chapter = _gs_mqsync_find_chapter( $url );
+  if( $chapter ) {
+
+    // we need the local gugid to save this properly
+    $gugid = db_query("SELECT gugid FROM gu_group_data WHERE group_nid = :nid", 
+               array(':nid'=>$sending_customer->nid))->fetchField();
+
+    if( $gugid ) {
+      $metadata->gugid = $gugid;
+    } else {
+      unset($metadata->gugid);
+      $metadata->is_new = TRUE;
+    }
+    $metadata->group_nid = $chapter->nid;
+    $metadata->save();
+    
+  } else {
+    watchdog('gs_mqsync', "The origin domain {$origin_domain} does not correspond to a known chapter.");
+  }
+  
 }
