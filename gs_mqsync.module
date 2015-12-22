@@ -289,13 +289,13 @@ function gs_mqsync_user_delete($account) {
  * hook_entity_insert / update
  * @purpose catch metadata creates and updates, and send to universe
  */
-function gs_mqsync_entity_insert($entity) {
-  if( $entity->type != 'gu_group_data' ) return;
+function gs_mqsync_entity_insert($entity, $type) {
+  if( $type != 'gu_group_data' ) return;
   if( !variable_get('gs_mqsync_sync_send', TRUE) || _gs_mqsync_receiving() ) return;
   gs_mqsync_send('universe_metadata', 'insert', $entity);
 }
-function gs_mqsync_entity_update($entity) {
-  if( $entity->type != 'gu_group_data' ) return;
+function gs_mqsync_entity_update($entity, $type) {
+  if( $type != 'gu_group_data' ) return;
   if( !variable_get('gs_mqsync_sync_send', TRUE) || _gs_mqsync_receiving() ) return;
   unset($entity->original);
   // TODO: potentially prevent sending this record of nothing material changed
