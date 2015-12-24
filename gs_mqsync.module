@@ -341,12 +341,13 @@ function gs_mqsync_process_queue() {
   $created_count = $updated_count = $deleted_count = 0;
   while( $msg = $channel->basic_get($queue_name, true) ) {
     $package = unserialize($msg->body);
+watchdog('gs_mqsync', "Received package: <pre>" . print_r($package,TRUE) . '</pre>');
 
     switch($package['operation']) {
       case 'person_update':
-        $membership = $update_package['membership'];
-        $person = $update_package['person'];
-        $origin_domain = $update_package['update_origin'];
+        $membership = $package['membership'];
+        $person = $package['person'];
+        $origin_domain = $package['update_origin'];
         $created = gs_mqsync_process_person_update($person, $membership, $origin_domain);
         if( $created ) {
           $created_count++;
@@ -359,20 +360,22 @@ function gs_mqsync_process_queue() {
       // allow remote deletion of people from a G3 site
       case 'person_delete':
         $person_uuid = $package['person_uuid'];
-        $origin_domain = $update_package['update_origin'];
+        $origin_domain = $package['update_origin'];
         $deleted = gs_mqsync_process_person_delete($person_uuid, $origin_domain);
         if( $deleted ) {
           $deleted_count++;
         }
         break;
 
+      case 'compare_users':
+        $user_data = $package['user_data'];
+        gs_mqsync_compare_users($user_data);
+        break;
+
       case 'metadata_update':
-        $gu_group_data = $update_package['metadata'];
-        $origin_domain = $update_package['update_origin'];
+        $gu_group_data = $package['metadata'];
+        $origin_domain = $package['update_origin'];
         $deleted = gs_mqsync_process_metadata_update($gu_group_data, $origin_domain);
-        if( $deleted ) {
-          $deleted_count++;
-        }
         break;
 
       default:
@@ -696,6 +699,22 @@ function gs_mqsync_process_person_delete($person_uuid, $origin_domain) {
   }
 }
 
+/**
+ * Process a request to check user data
+ * TODO: actually compare hashes. For now just send everything.
+ */
+function gs_mqsync_compare_users($user_data) {
+  // load all the accounts and send them
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'user');
+  $result = $query->execute();
+  if( isset($result['user']) ) {
+    $users = entity_load('user', array_keys($result['user']));
+    foreach($users AS $user) {
+      gs_mqsync_send_person('universe_user', 'update', $account);
+    }
+  }
+}
 
 /**
  * Process an incoming person delete record from Universe
@@ -711,16 +730,16 @@ function gs_mqsync_process_metadata_update($gu_group_data, $origin_domain) {
 
     // we need the local gugid to save this properly
     $gugid = db_query("SELECT gugid FROM gu_group_data WHERE group_nid = :nid", 
-               array(':nid'=>$sending_customer->nid))->fetchField();
+               array(':nid'=>$chapter->nid))->fetchField();
 
     if( $gugid ) {
-      $metadata->gugid = $gugid;
+      $gu_group_data->gugid = $gugid;
     } else {
-      unset($metadata->gugid);
-      $metadata->is_new = TRUE;
+      unset($gu_group_data->gugid);
+      $gu_group_data->is_new = TRUE;
     }
-    $metadata->group_nid = $chapter->nid;
-    $metadata->save();
+    $gu_group_data->group_nid = $chapter->nid;
+    $gu_group_data->save();
     
   } else {
     watchdog('gs_mqsync', "The origin domain {$origin_domain} does not correspond to a known chapter.");
