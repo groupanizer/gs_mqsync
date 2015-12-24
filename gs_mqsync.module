@@ -250,6 +250,17 @@ function gs_mqsync_send_person($queue, $operation, $account) {
     }
   }
 
+  // ensure that the required fields are set
+  if( !isset($package->field_first_name) ) {
+    $package->field_first_name = "NOT SET";
+  }
+  if( !isset($package->field_last_name) ) {
+    $package->field_last_name = "NOT SET";
+  }
+  if( !isset($package->mail) ) {
+    $package->mail = "email_not_set_for_{$package->name}@mailnull.com";
+  }
+
   gs_mqsync_send($queue, $operation, $package);
 }
 
@@ -434,10 +445,16 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
       $user->name = strtolower("{$person->first_name}.{$person->last_name}");
       // email handling
       // TODO: detect possible collisions, and maybe merge the records or flag them to merge
-      foreach($person->emails AS $e) {
-        if( $e->is_primary ) {
-          $user->mail = $e->email;
+      if( isset($person->emails) ) {
+        foreach($person->emails AS $e) {
+          if( $e->is_primary ) {
+            $user->mail = $e->email;
+          }
         }
+      }
+      if( !isset($user->mail) ) {
+        watchdog('gs_mqsync', "Account with no email rejected:<pre>" . print_r($person,TRUE) . '</pre>');
+        return;
       }
       // give this account the default roles
       $user->roles = variable_get('gs_mqsync_default_roles', array(4190371=>4190371));
@@ -534,7 +551,7 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
 
   } catch( Exception $e ) {
     $msg = t("Exception '@msg' at @backtrace on package: <pre>@package</pre>",
-             array('@msg'=>$e->getMessage(), '@package'=>print_r($update_package,TRUE), '@backtrace'=>$e->getTraceAsString()));
+             array('@msg'=>$e->getMessage(), '@package'=>print_r(array($person,$membership),TRUE), '@backtrace'=>$e->getTraceAsString()));
     drupal_set_message($msg, 'error');
     watchdog('gs_mqsync', $msg);
   }
@@ -714,6 +731,7 @@ function gs_mqsync_compare_users($user_data) {
   // load all the accounts and send them
   $query = new EntityFieldQuery();
   $query->entityCondition('entity_type', 'user');
+  $query->propertyCondition('uid', 1, '>');
   $result = $query->execute();
   if( isset($result['user']) ) {
     $users = entity_load('user', array_keys($result['user']));
