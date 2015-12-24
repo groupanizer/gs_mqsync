@@ -322,8 +322,6 @@ function gs_mqsync_receive_updates() {
 
 function gs_mqsync_process_queue() {
 
-  // don't do this if we're not set up to receive
-  if( !variable_get('gs_mqsync_sync_receive', TRUE) ) return;
   // set the flag that will prevent these from going back out and making a loop
   _gs_mqsync_receiving(TRUE);
 
@@ -345,25 +343,34 @@ watchdog('gs_mqsync', "Received package: <pre>" . print_r($package,TRUE) . '</pr
 
     switch($package['operation']) {
       case 'person_update':
-        $membership = $package['membership'];
-        $person = $package['person'];
-        $origin_domain = $package['update_origin'];
-        $created = gs_mqsync_process_person_update($person, $membership, $origin_domain);
-        if( $created ) {
-          $created_count++;
+        // don't do this if we're not set up to receive
+        if( variable_get('gs_mqsync_sync_receive', TRUE) ) {
+          $membership = $package['membership'];
+          $person = $package['person'];
+          $origin_domain = $package['update_origin'];
+          $created = gs_mqsync_process_person_update($person, $membership, $origin_domain);
+          if( $created ) {
+            $created_count++;
+          } else {
+            $updated_count++;
+          }
         } else {
-          $updated_count++;
+          watchdog('gs_mqsync', "Skipping person update - user sync is disabled");
         }
         break;
 
       // NB: this will only ever have an impact on an org site, because we never
       // allow remote deletion of people from a G3 site
       case 'person_delete':
-        $person_uuid = $package['person_uuid'];
-        $origin_domain = $package['update_origin'];
-        $deleted = gs_mqsync_process_person_delete($person_uuid, $origin_domain);
-        if( $deleted ) {
-          $deleted_count++;
+        if( variable_get('gs_mqsync_sync_receive', TRUE) ) {
+          $person_uuid = $package['person_uuid'];
+          $origin_domain = $package['update_origin'];
+          $deleted = gs_mqsync_process_person_delete($person_uuid, $origin_domain);
+          if( $deleted ) {
+            $deleted_count++;
+          }
+        } else {
+          watchdog('gs_mqsync', "Skipping person delete - user sync is disabled");
         }
         break;
 
@@ -379,7 +386,7 @@ watchdog('gs_mqsync', "Received package: <pre>" . print_r($package,TRUE) . '</pr
         break;
 
       default:
-        watchdog('gs_mqsync', "Unknown operation @op received - doing nothing.", array('@op'=>$data['operation']));
+        watchdog('gs_mqsync', "Unknown operation @op received - doing nothing.", array('@op'=>$package['operation']));
         break;
     }
 
