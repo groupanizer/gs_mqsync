@@ -5,6 +5,14 @@ static $connection;
 /**
  * Utility functions
  */
+function gs_mqsync_unique_username($person) {
+  $name = strtolower("{$person->first_name}.{$person->last_name}");
+  $cnt = db_query("SELECT count(name) FROM users WHERE name LIKE '{$name}%'")->fetchField();
+  if( $cnt ) {
+    $name .= $cnt;
+  }
+  return $name;
+}
 
 /**
  * Find a node representing a chapter, with a URL that matches the update origin
@@ -45,6 +53,7 @@ function _gs_mqsync_receiving($set = null) {
 
 /**
  * Substitute role IDs with machine names, and only send the named roles
+ * AND skip over the built-in roles, which are not needed
  */
 function _gs_mqsync_fix_roles($roles) {
   static $rolemap;
@@ -54,6 +63,7 @@ function _gs_mqsync_fix_roles($roles) {
   $new_roles = array();
   foreach(array_keys($roles) AS $rid) {
     $machine_name = $rolemap[$rid];
+    if( $machine_name == 'authenticated_user' ) continue;
     if( _g3core_role_category($machine_name) == 'named' ) {
       $new_roles[] = $machine_name;
     }
@@ -424,50 +434,96 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
 
   try {
 
-    // first let's see if we've already got a record for this person, by UUID
-    $uuid = $person->uuid;
-    $query = new EntityFieldQuery();
-    $query->entityCondition('entity_type', 'user');
-    $query->propertyCondition('uuid', $uuid);
-    $result = $query->execute();
-
-    if( isset($result['user']) ) {
-      $ids = array_keys($result['user']);
-      $list = entity_load('user', $ids);
-      $user = reset($list);
-      $created = FALSE;
-    } else {
-      $user = entity_create('user', array('type'=>'user'));
-      $user->uuid = $uuid;
-      $created = TRUE;
-      // some fields that should only be set on creation
-      $user->status = 1;
-      $user->name = strtolower("{$person->first_name}.{$person->last_name}");
-      // email handling
-      // TODO: detect possible collisions, and maybe merge the records or flag them to merge
-      if( isset($person->emails) ) {
-        foreach($person->emails AS $e) {
-          if( $e->is_primary ) {
-            $user->mail = $e->email;
-          }
+    // ensure the incoming record has an email address
+    $primary_email = '';
+    if( isset($person->emails) ) {
+      foreach($person->emails AS $e) {
+        if( $e->is_primary ) {
+          $primary_email = trim(strtolower($e->email));
         }
       }
-      if( !isset($user->mail) ) {
-        watchdog('gs_mqsync', "Account with no email rejected:<pre>" . print_r($person,TRUE) . '</pre>');
-        return;
+    }
+    if( empty($primary_email) ) {
+      watchdog('gs_mqsync', "Account with no email rejected:<pre>" . print_r($person,TRUE) . '</pre>');
+      return;
+    }
+
+    // first let's see if we've already got a record for this person, by UUID
+    $uuid_matching_user = null;
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'user');
+    $query->propertyCondition('uuid', $person->uuid);
+    $result = $query->execute();
+    if( isset($result['user']) ) {
+      $ids = array_keys($result['user']);
+      $uuid_matching_user = entity_load_single('user', reset($ids));
+    }
+
+    // also necessary to load by email to run correct logic, fast because of cache if it's the same user
+    $email_matching_user = null;
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'user');
+    $query->propertyCondition('mail', $primary_email);
+    $result = $query->execute();
+    if( isset($result['user']) ) {
+      $ids = array_keys($result['user']);
+      $email_matching_user = entity_load_single('user', reset($ids));
+    }
+
+    // check our various cases of UUID and email match
+    $created = FALSE;
+    $target_user = null;
+    if( $uuid_matching_user ) {
+      // UUID match and email match
+      if( $email_matching_user ) {
+        if( $uuid_matching_user->uuid == $email_matching_user->uuid ) {
+          $target_user = $uuid_matching_user;
+        } else {
+          watchdog('gs_mqsync', "Matched UUID and email to different accounts", WATCHDOG_ERROR);
+          return;
+        }
+      } 
+      // UUID match but no email match means we're updating the email address
+      else {
+        $target_user = $uuid_matching_user;
+        $target_user->mail = $primary_email;
       }
-      // give this account the default roles
-      $user->roles = variable_get('gs_mqsync_default_roles', array(4190371=>4190371));
+    } 
+    else {
+      // No UUID but we found it by email - update the UUID
+      if( $email_matching_user ) {
+        $target_user = $email_matching_user;
+        $target_user->uuid = $person->uuid;
+      }
+      // No UUID or email match, so create a new user
+      else {
+        $target_user = entity_create('user', array('type'=>'user'));
+        $target_user->status = 1;
+        $target_user->uuid = $person->uuid;
+        $target_user->mail = $primary_email;
+        // some fields that should only be set on creation
+        $target_user->name = gs_mqsync_unique_username($person);
+        $created = TRUE;
+
+        // give this account the default roles
+        $target_user->roles = variable_get('gs_mqsync_default_roles', array(4190371=>4190371));
+      }
+    }
+
+    // safety
+    if( !$target_user ) {
+      watchdog('gs_mqsync', "Somehow we do not have a target user.", WATCHDOG_ERROR);
+      return;
     }
 
     // now update remaining fields and save the user object
-    $uw = entity_metadata_wrapper('user', $user);
+    $uw = entity_metadata_wrapper('user', $target_user);
     $uw->field_first_name = $person->first_name;
     $uw->field_last_name = $person->last_name;
 
     // field_address
     $a = $person->field_address->und[0];
-    $user->field_address[LANGUAGE_NONE][0] = array(
+    $target_user->field_address[LANGUAGE_NONE][0] = array(
       'is_primary' => TRUE,
       'street' => $a->street,
       'city' => $a->city,
@@ -505,7 +561,7 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
       if( $file ) {
         $errors = file_validate_is_image($file);
         if( empty($errors) ) {
-          $user->picture = $file;
+          $target_user->picture = $file;
         }
       }
     }
@@ -557,8 +613,9 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
   }
 
 
-  if( $org_site ) {
-    gs_mqsync_process_membership($user, $membership, $origin_domain);
+  // memberships should only be processed on org sites, and only if we've got a valid user
+  if( $org_site && $target_user->uid ) {
+    gs_mqsync_process_membership($target_user, $membership, $origin_domain);
   }
 
   return $created;
@@ -569,6 +626,10 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
  * this user with a chapter record.
  */
 function gs_mqsync_process_membership($user, $membership, $origin_domain) {
+
+  // don't do any of this if we don't have a user record, or we wind up with a bunch
+  // of orphan records
+  if( !isset($user->uid) ) return;
 
   // find a matching chapter record, or create one
   $url = str_ireplace('http://', '', $origin_domain);
@@ -669,9 +730,9 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
       array(':uid'=>$user->uid, ':vid'=>$vid)
     )->fetchField();
     if( $tid ) {
-      $uw->field_voice_part->set($tid);
+      $uw->field_voice_part = $tid;
     } else {
-      $uw->field_voice_part->set(0);
+      $uw->field_voice_part = null;
     }
 
     // tags: chapter role - set it to the union of all values
@@ -690,10 +751,12 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
     if( $tids ) {
       $uw->field_chapter_role = $tids;
     } else {
-      $uw->field_chapter_role = array();
+      $uw->field_chapter_role = null;
     }
 
-
+/**
+Currently getting a "missing bundle property on entity of type taxonomy_term when we save this
+*/
     $uw->save();
 
   } catch( Exception $e ) {
