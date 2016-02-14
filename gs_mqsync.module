@@ -689,6 +689,7 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
     $org_membership->label = "{$user->name} belongs to {$chapter->title}";
     $org_membership->login_name = $membership->login_name;
     $org_membership->login_pass = $membership->login_pass;
+    $org_membership->status = $membership->status;
     $org_membership->member_id = $membership->member_id;
     $org_membership->membership_start = $membership->membership_start;
     $org_membership->membership_end = $membership->membership_end;
@@ -722,7 +723,7 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
     $uw = entity_metadata_wrapper('user', $user);
 
     // block this user if they are blocked on all the sites they belong to
-    $uw->status = db_query("SELECT MAX(status) FROM go_membership WHERE user_uid = :user_uid", array(':user_uid'=>$user->uid));
+    $uw->status = db_query("SELECT MAX(status) FROM go_membership WHERE user_uid = :user_uid", array(':user_uid'=>$user->uid))->fetchField();
 
     // membership start - take the earliest value from all membership records for this person
     $earliest = db_query(
@@ -760,42 +761,46 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
     }
 
     // tags: member type - just take the latest value. Doesn't matter much.
-    $vid = db_query("SELECT vid FROM taxonomy_vocabulary WHERE machine_name = 'member_type'")->fetchField();
-    $tid = db_query(
-     "SELECT DISTINCT td.tid
-      FROM go_membership g
-      JOIN go_membership_tag gt ON (g.gomid = gt.gomid)
-      JOIN taxonomy_term_data td ON (gt.value = td.machine_name)
-      WHERE 1=1
-      AND g.user_uid = :uid
-      AND td.vid = :vid
-      AND gt.vocab = 'member_type'
-      LIMIT 1",
-      array(':uid'=>$user->uid, ':vid'=>$vid)
-    )->fetchField();
-    if( $tid ) {
-      $uw->field_member_type = $tid;
-    } else {
-      $uw->field_member_type = null;
+    if( module_exists('go_member_type') ) {
+      $vid = db_query("SELECT vid FROM taxonomy_vocabulary WHERE machine_name = 'member_type'")->fetchField();
+      $tid = db_query(
+       "SELECT DISTINCT td.tid
+        FROM go_membership g
+        JOIN go_membership_tag gt ON (g.gomid = gt.gomid)
+        JOIN taxonomy_term_data td ON (gt.value = td.machine_name)
+        WHERE 1=1
+        AND g.user_uid = :uid
+        AND td.vid = :vid
+        AND gt.vocab = 'member_type'
+        LIMIT 1",
+        array(':uid'=>$user->uid, ':vid'=>$vid)
+      )->fetchField();
+      if( $tid ) {
+        $uw->field_member_type = $tid;
+      } else {
+        $uw->field_member_type = null;
+      }
     }
 
     // tags: chapter role - set it to the union of all values
-    $vid = db_query("SELECT vid FROM taxonomy_vocabulary WHERE machine_name = 'chapter_role'")->fetchField();
-    $tids = db_query(
-     "SELECT td.tid
-      FROM go_membership g
-      JOIN go_membership_tag gt ON (g.gomid = gt.gomid)
-      JOIN taxonomy_term_data td ON (gt.value = td.machine_name)
-      WHERE 1=1
-      AND g.user_uid = :uid
-      AND td.vid = :vid
-      AND gt.vocab = 'chapter_role'",
-      array(':uid'=>$user->uid, ':vid'=>$vid)
-    )->fetchCol();
-    if( $tids ) {
-      $uw->field_chapter_role = $tids;
-    } else {
-      $uw->field_chapter_role = null;
+    if( module_exists('go_member_type') ) {
+      $vid = db_query("SELECT vid FROM taxonomy_vocabulary WHERE machine_name = 'chapter_role'")->fetchField();
+      $tids = db_query(
+       "SELECT td.tid
+        FROM go_membership g
+        JOIN go_membership_tag gt ON (g.gomid = gt.gomid)
+        JOIN taxonomy_term_data td ON (gt.value = td.machine_name)
+        WHERE 1=1
+        AND g.user_uid = :uid
+        AND td.vid = :vid
+        AND gt.vocab = 'chapter_role'",
+        array(':uid'=>$user->uid, ':vid'=>$vid)
+      )->fetchCol();
+      if( $tids ) {
+        $uw->field_chapter_role = $tids;
+      } else {
+        $uw->field_chapter_role = null;
+      }
     }
 
     $uw->save();
