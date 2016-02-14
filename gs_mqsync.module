@@ -169,6 +169,7 @@ function gs_mqsync_person_fields() {
       array( 'name'=>'uuid', 'type'=>'scalar'),
       array( 'name'=>'name', 'type'=>'scalar'),
       array( 'name'=>'pass', 'type'=>'scalar'),
+      array( 'name'=>'status', 'type'=>'scalar'),
       array( 'name'=>'mail', 'type'=>'scalar'),
       array( 'name'=>'picture', 'type'=>'file'),
       array( 'name'=>'roles', 'type'=>'roles'),
@@ -251,7 +252,9 @@ function gs_mqsync_send_person($queue, $operation, $account) {
           $package->$field = $account->{$field}[LANGUAGE_NONE];
         }
         // substitute machine names
-        $package->$field = _gs_mqsync_fix_taxonomy($package->$field);
+        if( isset($package->$field) ) {
+          $package->$field = _gs_mqsync_fix_taxonomy($package->$field);
+        }
         break;
 
       default:
@@ -596,6 +599,17 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
           }
         }
 
+        // member_type
+        if( $t->vocab == 'member_type' ) {
+          $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname", 
+                   array(':mname'=>$t->value))->fetchField();
+          if( $tid ) {
+            $uw->field_member_type->set($tid);
+          } else {
+            watchdog('gs_mqsync', "Member type machine name '{$t->value}' not found.");
+          }
+        }
+
         // chapter role (multi-value)
         if( $t->vocab == 'chapter_role' ) {
           $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname", 
@@ -606,6 +620,7 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
             watchdog('gs_mqsync', "Voice part machine name '{$t->value}' not found.");
           }
         }
+
       }
     }
 
@@ -706,6 +721,9 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
     // special field handling on the user, taking into account the semantics of each field
     $uw = entity_metadata_wrapper('user', $user);
 
+    // block this user if they are blocked on all the sites they belong to
+    $uw->status = db_query("SELECT MAX(status) FROM go_membership WHERE user_uid = :user_uid", array(':user_uid'=>$user->uid));
+
     // membership start - take the earliest value from all membership records for this person
     $earliest = db_query(
       "SELECT MIN(membership_start) FROM go_membership 
@@ -741,26 +759,24 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
       $uw->field_voice_part = null;
     }
 
-    // tags: member_type - just take the latest value. Doesn't matter much.
+    // tags: member type - just take the latest value. Doesn't matter much.
     $vid = db_query("SELECT vid FROM taxonomy_vocabulary WHERE machine_name = 'member_type'")->fetchField();
-    if( $vid ) {
-      $tid = db_query(
-       "SELECT DISTINCT td.tid
-        FROM go_membership g
-        JOIN go_membership_tag gt ON (g.gomid = gt.gomid)
-        JOIN taxonomy_term_data td ON (gt.value = td.machine_name)
-        WHERE 1=1
-        AND g.user_uid = :uid
-        AND td.vid = :vid
-        AND gt.vocab = 'member_type'
-        LIMIT 1",
-        array(':uid'=>$user->uid, ':vid'=>$vid)
-      )->fetchField();
-      if( $tid ) {
-        $uw->field_member_type = $tid;
-      } else {
-        $uw->field_member_type = null;
-      }
+    $tid = db_query(
+     "SELECT DISTINCT td.tid
+      FROM go_membership g
+      JOIN go_membership_tag gt ON (g.gomid = gt.gomid)
+      JOIN taxonomy_term_data td ON (gt.value = td.machine_name)
+      WHERE 1=1
+      AND g.user_uid = :uid
+      AND td.vid = :vid
+      AND gt.vocab = 'member_type'
+      LIMIT 1",
+      array(':uid'=>$user->uid, ':vid'=>$vid)
+    )->fetchField();
+    if( $tid ) {
+      $uw->field_member_type = $tid;
+    } else {
+      $uw->field_member_type = null;
     }
 
     // tags: chapter role - set it to the union of all values
@@ -782,9 +798,6 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
       $uw->field_chapter_role = null;
     }
 
-/**
-Currently getting a "missing bundle property on entity of type taxonomy_term when we save this
-*/
     $uw->save();
 
   } catch( Exception $e ) {
