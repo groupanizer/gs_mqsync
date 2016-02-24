@@ -5,6 +5,11 @@ static $connection;
 /**
  * Utility functions
  */
+
+
+/**
+ * Create a unique username
+ */
 function gs_mqsync_unique_username($person) {
   $name = preg_replace("/[^A-Za-z0-9 ]/", strtolower("{$person->first_name}.{$person->last_name}"));
   $cnt = db_query("SELECT count(name) FROM users WHERE name LIKE '{$name}%'")->fetchField();
@@ -106,6 +111,10 @@ function _gs_mqsync_convert_domain_to_queue_name($domain) {
 }
 
 
+/**
+ * general hooks
+ */
+
 function gs_mqsync_menu() {
 
   // admin interface
@@ -136,6 +145,11 @@ function gs_mqsync_menu() {
 function gs_mqsync_cron() {
   gs_mqsync_process_queue();
 }
+
+
+/**
+ * Sending to Universe
+ */
 
 /**
  * Main send method
@@ -327,6 +341,9 @@ function gs_mqsync_entity_update($entity, $type) {
 }
 
 
+/**
+ * Receiving from Universe
+ */
 
 /**
  * Manually grab any pending updates in the queue
@@ -514,8 +531,6 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
         $target_user->name = gs_mqsync_unique_username($person);
         $created = TRUE;
 
-        // give this account the default roles
-        $target_user->roles = variable_get('gs_mqsync_default_roles', array(4190371=>4190371));
       }
     }
 
@@ -580,6 +595,7 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
     // do these updates only if we're NOT on an org site. They are handled specially if
     // we do have an org site.
     if( !$org_site ) {
+
       // simple fields
       $uw->field_member_since = strtotime($membership->membership_start);
       $uw->field_dues_paid_until = strtotime($membership->dues_paid_until);
@@ -628,11 +644,10 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
 
   } catch( Exception $e ) {
     $msg = t("Exception '@msg' at @backtrace on package: <pre>@package</pre>",
-             array('@msg'=>$e->getMessage(), '@package'=>print_r(array($person,$membership),TRUE), '@backtrace'=>$e->getTraceAsString()));
+      array('@msg'=>$e->getMessage(), '@package'=>print_r(array($person,$membership),TRUE), '@backtrace'=>$e->getTraceAsString()));
     drupal_set_message($msg, 'error');
     watchdog('gs_mqsync', $msg);
   }
-
 
   // memberships should only be processed on org sites, and only if we've got a valid user
   if( $org_site && $target_user->uid ) {
@@ -719,11 +734,36 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
     }
     $query->execute();
 
+
+    // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     // special field handling on the user, taking into account the semantics of each field
+    // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
     $uw = entity_metadata_wrapper('user', $user);
 
     // block this user if they are blocked on all the sites they belong to
     $uw->status = db_query("SELECT MAX(status) FROM go_membership WHERE user_uid = :user_uid", array(':user_uid'=>$user->uid))->fetchField();
+
+    // give them various security roles on this site if they have them on their chapter sites
+    $sync_roles = array(
+      4190371 => 'member',
+      185431326 =>'candidate',
+      256320132 => 'inactive_member',
+      222650013 => 'associate_member',
+    );
+    $membership_roles = db_query(
+     "SELECT DISTINCT r.rid
+      FROM go_membership_role mr
+      JOIN role r ON (mr.role = r.machine_name)
+      WHERE gomid = :gomid
+      AND mr.role IN( :sync_roles )",
+      array(':gomid'=>$org_membership->gomid, ':sync_roles'=>$sync_roles)
+    )->fetchCol();
+    // we had better not remove roles other than the ones listed!
+    $existing_non_sync_roles = array_diff_key($uw->roles->value(), $sync_roles);
+    $new_roles = array_merge($existing_non_sync_roles, $membership_roles);
+    // apparently takes an array of role IDs and keys don't matter
+    $uw->roles->set($new_roles);
 
     // membership start - take the earliest value from all membership records for this person
     $earliest = db_query(
