@@ -724,15 +724,17 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
 
     // tags
     db_query("DELETE from go_membership_tag WHERE gomid = :gomid", array(':gomid'=>$org_membership->gomid));
-    $query = db_insert('go_membership_tag')->fields(array('gomid', 'vocab', 'value'));
-    foreach($membership->tags AS $t) {
-      $query->values(array(
-        'gomid'=>$org_membership->gomid,
-        'vocab'=>$t->vocab,
-        'value'=>$t->value,
-      ));
+    if( isset($membership->tags) ) {
+      $query = db_insert('go_membership_tag')->fields(array('gomid', 'vocab', 'value'));
+      foreach($membership->tags AS $t) {
+        $query->values(array(
+          'gomid'=>$org_membership->gomid,
+          'vocab'=>$t->vocab,
+          'value'=>$t->value,
+        ));
+      }
+      $query->execute();
     }
-    $query->execute();
 
 
     // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
