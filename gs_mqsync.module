@@ -606,8 +606,9 @@ function gs_mqsync_process_person_update($person, $membership, $origin_domain) {
 
         // voice part
         if( $t->vocab == 'voice_part' ) {
-          $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname", 
-                   array(':mname'=>$t->value))->fetchField();
+          $vid = db_query("SELECT vid FROM taxonomy_vocabulary WHERE machine_name = 'sections'")->fetchField();
+          $tid = db_query("SELECT tid FROM taxonomy_term_data WHERE machine_name = :mname AND vid = :vid", 
+                   array(':mname'=>$t->value, ':vid'=>$vid))->fetchField();
           if( $tid ) {
             $uw->field_voice_part->set($tid);
           } else {
