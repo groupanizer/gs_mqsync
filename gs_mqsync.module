@@ -897,7 +897,7 @@ function gs_mqsync_compare_users($user_data) {
  * Update the UUID of a person to match Universe for subsequent sync operations
  */
 function gs_mqsync_update_user_uuid($old_uuid, $new_uuid) {
-  db_query("UPDATE user SET uuid = :new_uuid WHERE uuid = :old_uuid",
+  db_query("UPDATE users SET uuid = :new_uuid WHERE uuid = :old_uuid",
     array(':old_uuid'=>$old_uuid, ':new_uuid'=>$new_uuid ));
 }
 
