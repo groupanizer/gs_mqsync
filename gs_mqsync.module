@@ -11,7 +11,7 @@ static $connection;
  * Create a unique username
  */
 function gs_mqsync_unique_username($person) {
-  $name = preg_replace("/[^A-Za-z0-9 ]/", strtolower("{$person->first_name}.{$person->last_name}"));
+  $name = preg_replace("/[^A-Za-z0-9 ]/", '', strtolower("{$person->first_name}.{$person->last_name}"));
   $cnt = db_query("SELECT count(name) FROM users WHERE name LIKE '{$name}%'")->fetchField();
   if( $cnt ) {
     $name .= $cnt;
@@ -750,7 +750,7 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
     // give them various security roles on this site if they have them on their chapter sites
     $sync_roles = array(
       4190371 => 'member',
-      185431326 =>'candidate',
+      185431326 => 'candidate',
       256320132 => 'inactive_member',
       222650013 => 'associate_member',
     );
@@ -762,8 +762,9 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
       AND mr.role IN( :sync_roles )",
       array(':gomid'=>$org_membership->gomid, ':sync_roles'=>$sync_roles)
     )->fetchCol();
+
     // we had better not remove roles other than the ones listed!
-    $existing_non_sync_roles = array_diff_key($uw->roles->value(), $sync_roles);
+    $existing_non_sync_roles = array_diff($uw->roles->value(), array_keys($sync_roles));
     $new_roles = array_merge($existing_non_sync_roles, $membership_roles);
     // apparently takes an array of role IDs and keys don't matter
     $uw->roles->set($new_roles);
@@ -868,9 +869,29 @@ function gs_mqsync_process_person_delete($person_uuid, $origin_domain) {
   $chapter = _gs_mqsync_find_chapter( $url );
   if( $chapter ) {
 
-    // find and remove the membership
+    // find the person record
+    $query = new EntityFieldQuery();
+    $query->entityCondition('entity_type', 'user');
+    $query->propertyCondition('uuid', $person_uuid);
+    $result = $query->execute();
+    if( isset($result['user']) ) {
+      $ids = array_keys($result['user']);
+      $uid = reset($ids);
 
-    // possibly set membership end date
+      // find and remove the membership
+      $query = new EntityFieldQuery();
+      $query->entityCondition('entity_type', 'go_membership');
+      $query->propertyCondition('user_uid', $uid);
+      $query->propertyCondition('chapter_nid', $chapter->nid);
+      $result = $query->execute();
+      if( isset($result['go_membership']) ) {
+        $ids = array_keys($result['go_membership']);
+        $gomid = reset($ids);
+        entity_delete('go_membership', $gomic);
+      }
+    }
+
+    // TODO: possibly set membership end date
  
   }
 }
