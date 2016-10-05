@@ -209,6 +209,9 @@ function gs_mqsync_person_fields() {
  */
 function gs_mqsync_send_person($queue, $operation, $account) {
 
+  // always skip user 1
+  if( $account->uid == 1 ) return;
+
   // just the fields we care about, and grab the best language
   $lang = isset($account->language) ? $account->language : LANGUAGE_NONE;
   $package = new StdClass();
@@ -861,6 +864,9 @@ function gs_mqsync_process_membership($user, $membership, $origin_domain) {
  * Process an incoming person delete record from Universe
  */
 function gs_mqsync_process_person_delete($person_uuid, $origin_domain) {
+
+watchdog('gs_mqsync', "Processing person delete for $person_uuid from $origin_domain");
+
   $org_site = module_exists('go_membership');
   if( !$org_site ) { return; }
 
@@ -875,8 +881,7 @@ function gs_mqsync_process_person_delete($person_uuid, $origin_domain) {
     $query->propertyCondition('uuid', $person_uuid);
     $result = $query->execute();
     if( isset($result['user']) ) {
-      $ids = array_keys($result['user']);
-      $uid = reset($ids);
+      $uid = key($result['user']);
 
       // find and remove the membership
       $query = new EntityFieldQuery();
@@ -885,14 +890,21 @@ function gs_mqsync_process_person_delete($person_uuid, $origin_domain) {
       $query->propertyCondition('chapter_nid', $chapter->nid);
       $result = $query->execute();
       if( isset($result['go_membership']) ) {
-        $ids = array_keys($result['go_membership']);
-        $gomid = reset($ids);
-        entity_delete('go_membership', $gomic);
+        $gomid = key($result['go_membership']);
+        entity_delete('go_membership', $gomid);
+      }
+
+      // now if the user is an orphan, remove Member status and block the account
+      $query = new EntityFieldQuery();
+      $query->entityCondition('entity_type', 'go_membership');
+      $query->propertyCondition('user_uid', $uid);
+      $result = $query->execute();
+      if( !isset($result['go_membership']) || sizeof($result['go_membership']) == 0 ) {
+        $user = entity_load_single('user', $uid);
+        $user->status = 0;
+        $user->save();
       }
     }
-
-    // TODO: possibly set membership end date
- 
   }
 }
 
