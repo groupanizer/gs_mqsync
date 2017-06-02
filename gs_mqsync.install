@@ -5,9 +5,22 @@
  */
 function gs_mqsync_install() {
   variable_set('rabbitmq_credentials', array(
-    'host' => '198.16.5.72',
+    'host' => 'messagequeue.choirgenius.com',
     'port' => 5672,
     'username' => 'g3site',
     'password' => 'g3site',
   ));
 }
+
+/**
+ * update to fix credentials
+ */
+function gu_mqsync_update_7001() {
+  variable_set('rabbitmq_credentials', array(
+    'host' => 'messagequeue.choirgenius.net',
+    'port' => 5672,
+    'username' => 'g3site',
+    'password' => 'g3site',
+  ));
+}
+~          
