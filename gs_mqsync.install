@@ -15,7 +15,7 @@ function gs_mqsync_install() {
 /**
  * update to fix credentials
  */
-function gu_mqsync_update_7001() {
+function gs_mqsync_update_7001() {
   variable_set('rabbitmq_credentials', array(
     'host' => 'messagequeue.choirgenius.net',
     'port' => 5672,
@@ -23,4 +23,5 @@ function gu_mqsync_update_7001() {
     'password' => 'g3site',
   ));
 }
-~          
+
+
